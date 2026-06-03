@@ -18,7 +18,7 @@ def run_server(config_path: str | Path) -> None:
 
     from .ws_server import create_app
 
-    app = create_app()
+    app = create_app(cfg)
     uvicorn.run(app, host=cfg.bind.host, port=cfg.bind.port, log_level="info")
 
 
