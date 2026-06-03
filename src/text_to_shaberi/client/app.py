@@ -337,7 +337,15 @@ def run_gui(config_path: str | Path) -> None:
             await asyncio.to_thread(mic_holder[0].stop)
         await ws.close()
 
-    app.aboutToQuit.connect(lambda: asyncio.ensure_future(_shutdown()))
+    def _on_quit() -> None:
+        # 終了時: loop が回っている間だけ shutdown を schedule（停止後の ensure_future で落とさない）
+        try:
+            if loop.is_running():
+                asyncio.ensure_future(_shutdown())
+        except Exception:
+            pass
+
+    app.aboutToQuit.connect(_on_quit)
 
     with loop:
         loop.run_forever()
