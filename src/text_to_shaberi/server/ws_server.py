@@ -1,10 +1,11 @@
-"""WS サーバ FastAPI アプリ（S1 本実装: /healthz + /ws + lifespan）。
+"""WS サーバ FastAPI アプリ（S2: /healthz + /ws + lifespan + STT）。
 
-create_app(config, tts_client) で TestClient から注入可能。
-lifespan で TTSClient の所有権を制御する。
+create_app(config, tts_client, stt_engine) で TestClient から注入可能。
+lifespan で TTSClient / STTEngine の所有権を制御する。
 """
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -25,8 +26,8 @@ _DEFAULT_CONFIG = Path(__file__).resolve().parents[3] / "server.toml"
 def create_app(
     config: ServerConfig | None = None,
     tts_client: Any = None,
+    stt_engine: Any = None,
 ) -> FastAPI:
-    """FastAPI アプリを生成する。"""
     if config is None:
         config = load_server_config(_DEFAULT_CONFIG)
 
@@ -36,25 +37,36 @@ def create_app(
     available_profiles = _enumerate_profiles(profiles_dir)
     _owns_client = tts_client is None
     _injected_client = tts_client
+    _owns_stt = stt_engine is None
+    _injected_stt = stt_engine
+    stt_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # owned(既定)のときだけ TTSClient を生成・close する。
-        # 注入clientや同期stateは create_app 本体で設定済み（lifespan未起動でも参照可能）。
         if _owns_client:
             from .tts.client import TTSClient
 
             app.state.tts_client = TTSClient()
+        if _owns_stt:
+            cfg: ServerConfig = app.state.config
+            if cfg.stt.backend == "qwen_local":
+                from .stt.engine import QwenSTTEngine
+
+                app.state.stt_engine = QwenSTTEngine(cfg.stt.qwen_local)
+            else:
+                raise RuntimeError(f"unsupported STT backend: {cfg.stt.backend}")
         yield
         if _owns_client and app.state.tts_client is not None:
             await app.state.tts_client.aclose()
+        app.state.stt_executor.shutdown(wait=False)
 
     app = FastAPI(title="text-to-shaberi-server", version="0.1.0", lifespan=lifespan)
-    # 同期state: lifespan未起動の TestClient 経路でも参照可能にする
     app.state.config = config
     app.state.profiles_dir = profiles_dir
     app.state.available_profiles = available_profiles
-    app.state.tts_client = _injected_client  # 注入(fake) or None(ownedはlifespanで生成)
+    app.state.tts_client = _injected_client
+    app.state.stt_engine = _injected_stt
+    app.state.stt_executor = stt_executor
 
     @app.get("/healthz")
     async def healthz() -> dict:
@@ -80,6 +92,9 @@ def create_app(
             profiles_dir=app.state.profiles_dir,
             tts_client=app.state.tts_client,
             available_profiles=app.state.available_profiles,
+            stt_engine=app.state.stt_engine,
+            stt_executor=app.state.stt_executor,
+            language=cfg.stt.language,
         )
         session = Session(ws, state)
         try:
@@ -91,7 +106,6 @@ def create_app(
 
 
 def _enumerate_profiles(profiles_dir: str) -> list[ProfileInfo]:
-    """profiles/tts/*.toml を列挙して ProfileInfo のリストを返す。"""
     tts_dir = Path(profiles_dir) / "tts"
     if not tts_dir.is_dir():
         return []

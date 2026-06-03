@@ -1,4 +1,4 @@
-"""WS セッションオーケストレータ（S1: speak/cancel 状態機械）。
+"""WS セッションオーケストレータ（S2: speak/cancel/stt_begin/binary/stt_end）。
 
 1接続につき1 Session。全送信は _send_model/_send_bytes/_send_stopped_best_effort
 に一元化し asyncio.Lock で直列化する。
@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from fastapi import WebSocket
 
+from ..common.pcm import _pcm_to_float32, bytes_per_sample
 from ..common.protocol import (
     AudioBegin,
     AudioEnd,
@@ -25,11 +26,21 @@ from ..common.protocol import (
     Ready,
     Speak,
     Stopped,
+    SttBegin,
+    SttEnd,
+    Transcript,
     parse_message,
 )
 from .tts.profile import TTSProfile, load_profile
 
 logger = logging.getLogger(__name__)
+
+_STT_MAX_SECONDS = 60
+
+
+@dataclass(slots=True)
+class BinaryFrame:
+    data: bytes
 
 
 @dataclass(slots=True)
@@ -38,19 +49,40 @@ class SessionState:
     profiles_dir: str
     tts_client: object
     available_profiles: list[ProfileInfo]
+    stt_engine: object | None = None
+    stt_executor: object | None = None
+    language: str = "ja"
 
 
 class Session:
-    """1 WS 接続の状態とロジック。"""
-
     def __init__(self, ws: WebSocket, state: SessionState) -> None:
         self.ws = ws
         self.state = state
         self.session_id = uuid4().hex
         self.active_stream_id: str | None = None
         self.active_task: asyncio.Task | None = None
+        self.active_parent_id: str | None = None
+        self.active_stt_id: str | None = None
+        self.stt_buffer: bytearray = bytearray()
+        self.stt_format: AudioFormatPayload | None = None
+        self.stt_auto_tts: bool = False
         self._send_lock = asyncio.Lock()
         self._handshake_done = False
+
+    # ------------------------------------------------------------------
+    # busy / capture helpers
+    # ------------------------------------------------------------------
+    def _busy(self) -> bool:
+        return (
+            self.active_stt_id is not None
+            or (self.active_task is not None and not self.active_task.done())
+        )
+
+    def _reset_stt_capture(self) -> None:
+        self.active_stt_id = None
+        self.stt_buffer = bytearray()
+        self.stt_format = None
+        self.stt_auto_tts = False
 
     # ------------------------------------------------------------------
     # 送信一元化
@@ -74,11 +106,6 @@ class Session:
     # 受信ヘルパ
     # ------------------------------------------------------------------
     async def _receive_message(self) -> object | None:
-        """ws.receive() で dict を受け取り text/bytes を分岐。
-
-        正常時は parsed BaseModel を返す。binary は error を返す。
-        JSON 不正・不明 type も error を返す（id=None）。
-        """
         msg = await self.ws.receive()
         if "text" in msg:
             try:
@@ -90,7 +117,7 @@ class Session:
             except ValueError:
                 return ErrorMsg(id=None, message=f"unknown message type: {data.get('type', '')}")
         if "bytes" in msg:
-            return ErrorMsg(id=None, message="binary unsupported in S1")
+            return BinaryFrame(data=msg["bytes"])
         return None
 
     # ------------------------------------------------------------------
@@ -146,7 +173,7 @@ class Session:
             tts=fmt,
             profiles=self.state.available_profiles,
             limits={"max_chunk_bytes": 65536},
-            features={"auto_tts": False},
+            features={"auto_tts": True},
         )
         await self._send_model(ready)
         self._handshake_done = True
@@ -174,13 +201,19 @@ class Session:
                 await self._send_model(ErrorMsg(id=None, message=parsed.message))
                 continue
 
-            if isinstance(parsed, Speak):
+            if isinstance(parsed, BinaryFrame):
+                await self._handle_binary(parsed.data)
+            elif isinstance(parsed, SttBegin):
+                await self._handle_stt_begin(parsed)
+            elif isinstance(parsed, SttEnd):
+                await self._handle_stt_end(parsed)
+            elif isinstance(parsed, Speak):
                 await self._handle_speak(parsed)
             elif isinstance(parsed, Cancel):
                 await self._handle_cancel(parsed)
             else:
                 type_name = type(parsed).__name__
-                await self._send_model(ErrorMsg(id=None, message=f"unsupported in S1: {type_name}"))
+                await self._send_model(ErrorMsg(id=None, message=f"unsupported: {type_name}"))
 
     # ------------------------------------------------------------------
     # speak
@@ -190,7 +223,7 @@ class Session:
             await self._send_model(ErrorMsg(id=None, message="speak.id is required"))
             return
 
-        if self.active_task is not None and not self.active_task.done():
+        if self._busy():
             await self._send_model(ErrorMsg(id=msg.id, message="busy: stream already active"))
             return
 
@@ -205,17 +238,25 @@ class Session:
             return
 
         self.active_stream_id = msg.id
+        self.active_parent_id = None
         self.active_task = asyncio.create_task(
             self._stream_tts(msg.id, profile, msg.text)
         )
 
-    async def _stream_tts(self, stream_id: str, profile: TTSProfile, text: str) -> None:
+    async def _stream_tts(
+        self,
+        stream_id: str,
+        profile: TTSProfile,
+        text: str,
+        parent_id: str | None = None,
+        manage_active: bool = True,
+    ) -> None:
         fmt = AudioFormatPayload(
             codec="pcm_s16le",
             sample_rate=profile.audio.sample_rate,
             channels=profile.audio.channels,
         )
-        await self._send_model(AudioBegin(id=stream_id, format=fmt))
+        await self._send_model(AudioBegin(id=stream_id, parent_id=parent_id, format=fmt))
         try:
             async for chunk in self.state.tts_client.stream(profile, text):
                 await self._send_bytes(chunk)
@@ -226,16 +267,130 @@ class Session:
         except Exception as exc:
             await self._send_model(ErrorMsg(id=stream_id, message=repr(exc)))
         finally:
+            if manage_active:
+                task = asyncio.current_task()
+                if self.active_task is task and self.active_stream_id == stream_id:
+                    self.active_task = None
+                    self.active_stream_id = None
+                    self.active_parent_id = None
+
+    # ------------------------------------------------------------------
+    # stt_begin / binary / stt_end
+    # ------------------------------------------------------------------
+    async def _handle_stt_begin(self, msg: SttBegin) -> None:
+        if not msg.id:
+            await self._send_model(ErrorMsg(id=None, message="stt_begin.id is required"))
+            return
+
+        if self._busy():
+            await self._send_model(ErrorMsg(id=msg.id, message="busy: stream already active"))
+            return
+
+        self.active_stt_id = msg.id
+        self.stt_buffer = bytearray()
+        self.stt_format = msg.format
+        self.stt_auto_tts = msg.auto_tts
+
+    async def _handle_binary(self, data: bytes) -> None:
+        if self.active_stt_id is None:
+            await self._send_model(ErrorMsg(id=None, message="no active stt stream"))
+            return
+
+        self.stt_buffer += data
+        fmt = self.stt_format
+        max_bytes = int(_STT_MAX_SECONDS * fmt.sample_rate * bytes_per_sample(fmt.codec) * fmt.channels)
+        if len(self.stt_buffer) > max_bytes:
+            await self._send_model(ErrorMsg(id=self.active_stt_id, message="stt audio too large"))
+            self._reset_stt_capture()
+
+    async def _handle_stt_end(self, msg: SttEnd) -> None:
+        if msg.id != self.active_stt_id:
+            await self._send_model(ErrorMsg(id=msg.id, message="no active stt stream"))
+            return
+
+        fmt = self.stt_format
+        auto_tts = self.stt_auto_tts
+        stt_id = self.active_stt_id
+
+        frame_bytes = bytes_per_sample(fmt.codec) * fmt.channels
+        usable = len(self.stt_buffer) - (len(self.stt_buffer) % frame_bytes)
+        buf = bytes(self.stt_buffer[:usable])
+
+        self._reset_stt_capture()
+        self.active_stream_id = stt_id
+        self.active_parent_id = None
+        self.active_task = asyncio.create_task(
+            self._process_stt(stt_id, buf, fmt, auto_tts)
+        )
+
+    # ------------------------------------------------------------------
+    # _process_stt / _run_auto_tts
+    # ------------------------------------------------------------------
+    async def _process_stt(
+        self,
+        stt_id: str,
+        buf: bytes,
+        fmt: AudioFormatPayload,
+        auto_tts: bool,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        try:
+            samples = _pcm_to_float32(buf, fmt.codec, fmt.channels)
+            if samples.size == 0:
+                await self._send_model(Transcript(id=stt_id, text="", final=True))
+            else:
+                text = await loop.run_in_executor(
+                    self.state.stt_executor,
+                    self.state.stt_engine.transcribe,
+                    samples,
+                    fmt.sample_rate,
+                    self.state.language,
+                )
+                await self._send_model(Transcript(id=stt_id, text=text, final=True))
+                if auto_tts and text.strip():
+                    await self._run_auto_tts(stt_id, text)
+        except asyncio.CancelledError:
+            # auto_tts の TTS 中(active_parent_id 設定済)は _stream_tts が既に stopped を送出済み。
+            # 二重送信を避け、STT 推論中(parent_id None)の cancel のみここで stopped を送る。
+            if self.active_parent_id is None:
+                await self._send_stopped_best_effort(self.active_stream_id or stt_id)
+            raise
+        except Exception as exc:
+            await self._send_model(ErrorMsg(id=stt_id, message=repr(exc)))
+        finally:
             task = asyncio.current_task()
-            if self.active_task is task and self.active_stream_id == stream_id:
+            if self.active_task is task:
                 self.active_task = None
                 self.active_stream_id = None
+                self.active_parent_id = None
+
+    async def _run_auto_tts(self, stt_id: str, text: str) -> None:
+        from .config import ServerConfig
+
+        cfg: ServerConfig = self.state.config
+        try:
+            profile = load_profile(self.state.profiles_dir, cfg.tts.active_profile)
+        except Exception as exc:
+            await self._send_model(ErrorMsg(id=stt_id, message=repr(exc)))
+            return
+
+        tts_id = f"tts-{stt_id}"
+        self.active_stream_id = tts_id
+        self.active_parent_id = stt_id
+        await self._stream_tts(tts_id, profile, text, parent_id=stt_id, manage_active=False)
 
     # ------------------------------------------------------------------
     # cancel
     # ------------------------------------------------------------------
     async def _handle_cancel(self, msg: Cancel) -> None:
-        if self.active_stream_id == msg.id and self.active_task is not None and not self.active_task.done():
+        if msg.id == self.active_stt_id:
+            self._reset_stt_capture()
+            await self._send_model(Stopped(id=msg.id))
+        elif (
+            self.active_task is not None
+            and not self.active_task.done()
+            and msg.id in {self.active_stream_id, self.active_parent_id}
+        ):
             self.active_task.cancel()
         else:
             await self._send_model(ErrorMsg(id=msg.id, message="no active stream"))
@@ -252,3 +407,5 @@ class Session:
                 pass
         self.active_task = None
         self.active_stream_id = None
+        self.active_parent_id = None
+        self._reset_stt_capture()

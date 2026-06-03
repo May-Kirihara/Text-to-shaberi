@@ -9,10 +9,20 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+import numpy as np
+
 from text_to_shaberi.common.audio_format import AudioFormat
 from text_to_shaberi.server.config import ServerConfig, TTSConfig, BindConfig
 from text_to_shaberi.server.tts.profile import TTSProfile
 from text_to_shaberi.server.ws_server import create_app
+
+
+class _FakeSTTEngine:
+    def transcribe(self, samples: np.ndarray, sample_rate: int, language: str) -> str:
+        return ""
+
+
+_FAKE_STT = _FakeSTTEngine()
 
 
 def _make_profile() -> TTSProfile:
@@ -94,7 +104,7 @@ def cfg():
 
 class TestHelloReady:
     def test_hello_returns_ready(self, cfg, fake_client) -> None:
-        with TestClient(create_app(cfg, tts_client=fake_client)) as client:
+        with TestClient(create_app(cfg, tts_client=fake_client, stt_engine=_FAKE_STT)) as client:
             with client.websocket_connect("/ws") as ws:
                 ws.send_json({"type": "hello", "protocol_version": 1})
                 data = ws.receive_json()
@@ -104,12 +114,12 @@ class TestHelloReady:
                 assert data["tts"]["sample_rate"] == 32000
                 assert data["tts"]["channels"] == 1
                 assert isinstance(data["profiles"], list)
-                assert data["features"]["auto_tts"] is False
+                assert data["features"]["auto_tts"] is True
                 assert "server_time" in data
                 assert data["limits"]["max_chunk_bytes"] == 65536
 
     def test_non_hello_first_message_closes(self, cfg, fake_client) -> None:
-        with TestClient(create_app(cfg, tts_client=fake_client)) as client:
+        with TestClient(create_app(cfg, tts_client=fake_client, stt_engine=_FAKE_STT)) as client:
             with client.websocket_connect("/ws") as ws:
                 ws.send_json({"type": "speak", "id": "u1", "text": "hi"})
                 data = ws.receive_json()
@@ -120,7 +130,7 @@ class TestHelloReady:
 class TestSpeak:
     def test_speak_produces_audio_flow(self, cfg) -> None:
         fake = FakeTTSClient(chunks=3, chunk_samples=160)
-        with TestClient(create_app(cfg, tts_client=fake)) as client:
+        with TestClient(create_app(cfg, tts_client=fake, stt_engine=_FAKE_STT)) as client:
             with client.websocket_connect("/ws") as ws:
                 ws.send_json({"type": "hello", "protocol_version": 1})
                 ready = ws.receive_json()
@@ -148,7 +158,7 @@ class TestSpeak:
 
     def test_speak_uses_injected_client(self, cfg) -> None:
         fake = FakeTTSClient(chunks=2)
-        with TestClient(create_app(cfg, tts_client=fake)) as client:
+        with TestClient(create_app(cfg, tts_client=fake, stt_engine=_FAKE_STT)) as client:
             with client.websocket_connect("/ws") as ws:
                 ws.send_json({"type": "hello", "protocol_version": 1})
                 ws.receive_json()
@@ -164,7 +174,7 @@ class TestSpeak:
 class TestBusySideband:
     def test_second_speak_while_active_is_busy_sideband(self, cfg) -> None:
         slow_fake = SlowFakeTTSClient(chunks=10)
-        with TestClient(create_app(cfg, tts_client=slow_fake)) as client:
+        with TestClient(create_app(cfg, tts_client=slow_fake, stt_engine=_FAKE_STT)) as client:
             with client.websocket_connect("/ws") as ws:
                 ws.send_json({"type": "hello", "protocol_version": 1})
                 ws.receive_json()
@@ -182,7 +192,7 @@ class TestBusySideband:
 class TestCancel:
     def test_cancel_stops_active_stream(self, cfg) -> None:
         slow_fake = SlowFakeTTSClient(chunks=20)
-        with TestClient(create_app(cfg, tts_client=slow_fake)) as client:
+        with TestClient(create_app(cfg, tts_client=slow_fake, stt_engine=_FAKE_STT)) as client:
             with client.websocket_connect("/ws") as ws:
                 ws.send_json({"type": "hello", "protocol_version": 1})
                 ws.receive_json()
@@ -211,7 +221,7 @@ class TestCancel:
                 assert stopped[0]["id"] == "u1"
 
     def test_cancel_no_active_stream_returns_error(self, cfg, fake_client) -> None:
-        with TestClient(create_app(cfg, tts_client=fake_client)) as client:
+        with TestClient(create_app(cfg, tts_client=fake_client, stt_engine=_FAKE_STT)) as client:
             with client.websocket_connect("/ws") as ws:
                 ws.send_json({"type": "hello", "protocol_version": 1})
                 ws.receive_json()
@@ -226,7 +236,7 @@ class TestToken:
     def test_wrong_token_rejected(self) -> None:
         fake = FakeTTSClient()
         cfg = _make_config(token="secret123")
-        with TestClient(create_app(cfg, tts_client=fake)) as client:
+        with TestClient(create_app(cfg, tts_client=fake, stt_engine=_FAKE_STT)) as client:
             with pytest.raises(Exception):
                 with client.websocket_connect("/ws?token=wrong") as ws:
                     ws.send_json({"type": "hello"})
@@ -234,7 +244,7 @@ class TestToken:
     def test_correct_token_accepted(self) -> None:
         fake = FakeTTSClient()
         cfg = _make_config(token="secret123")
-        with TestClient(create_app(cfg, tts_client=fake)) as client:
+        with TestClient(create_app(cfg, tts_client=fake, stt_engine=_FAKE_STT)) as client:
             with client.websocket_connect("/ws?token=secret123") as ws:
                 ws.send_json({"type": "hello", "protocol_version": 1})
                 data = ws.receive_json()
@@ -243,7 +253,7 @@ class TestToken:
     def test_bearer_token_accepted(self) -> None:
         fake = FakeTTSClient()
         cfg = _make_config(token="secret123")
-        with TestClient(create_app(cfg, tts_client=fake)) as client:
+        with TestClient(create_app(cfg, tts_client=fake, stt_engine=_FAKE_STT)) as client:
             with client.websocket_connect(
                 "/ws", headers={"Authorization": "Bearer secret123"}
             ) as ws:
@@ -254,14 +264,14 @@ class TestToken:
 
 class TestHandshakeErrors:
     def test_invalid_json_returns_error(self, cfg, fake_client) -> None:
-        with TestClient(create_app(cfg, tts_client=fake_client)) as client:
+        with TestClient(create_app(cfg, tts_client=fake_client, stt_engine=_FAKE_STT)) as client:
             with client.websocket_connect("/ws") as ws:
                 ws.send_text("not json at all")
                 data = ws.receive_json()
                 assert data["type"] == "error"
 
     def test_unknown_type_returns_error_after_handshake(self, cfg, fake_client) -> None:
-        with TestClient(create_app(cfg, tts_client=fake_client)) as client:
+        with TestClient(create_app(cfg, tts_client=fake_client, stt_engine=_FAKE_STT)) as client:
             with client.websocket_connect("/ws") as ws:
                 ws.send_json({"type": "hello", "protocol_version": 1})
                 ws.receive_json()
@@ -273,7 +283,7 @@ class TestHandshakeErrors:
 
 class TestSpeakIdRequired:
     def test_speak_empty_id_returns_error(self, cfg, fake_client) -> None:
-        with TestClient(create_app(cfg, tts_client=fake_client)) as client:
+        with TestClient(create_app(cfg, tts_client=fake_client, stt_engine=_FAKE_STT)) as client:
             with client.websocket_connect("/ws") as ws:
                 ws.send_json({"type": "hello", "protocol_version": 1})
                 ws.receive_json()
