@@ -23,7 +23,7 @@ class ServerConfig:
 class OutputConfig:
     device: str = "default"
     resample: str = "auto"
-    prime_ms: int = 500
+    prime_ms: int = 0
 
 
 @dataclass(slots=True)

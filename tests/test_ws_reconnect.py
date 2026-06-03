@@ -52,17 +52,54 @@ class _SinkFactory:
         return s
 
 
+class _FakeEngine:
+    def __init__(self, **kwargs):
+        self.records = []
+
+    def prewarm(self, device):
+        self.records.append(("prewarm", device))
+
+    def begin(self, fmt, device):
+        self.records.append(("begin",))
+
+    def feed(self, chunk):
+        self.records.append(("feed",))
+        return True
+
+    def end(self):
+        self.records.append(("end",))
+
+    def abort(self):
+        self.records.append(("abort",))
+
+    def close(self):
+        self.records.append(("close",))
+
+    def join(self, timeout=2.0):
+        pass
+
+
+class _EngineFactory:
+    def __init__(self):
+        self.engine = None
+
+    def __call__(self, **kwargs):
+        if self.engine is None:
+            self.engine = _FakeEngine(**kwargs)
+        return self.engine
+
+
 def _ready_json():
     return Ready(session_id="t").model_dump_json()
 
 
-def _make_ws_client(port, sink_factory, states, logs=None, **kw):
+def _make_ws_client(port, engine_factory, states, logs=None, **kw):
     from text_to_shaberi.client.ws_client import WSClient
     return WSClient(
         f"ws://127.0.0.1:{port}/ws",
         on_log=logs.append if logs else lambda m: None,
         on_state=lambda e, p=None: states.append((e, p)),
-        sink_factory=sink_factory,
+        engine_factory=engine_factory,
         loop=asyncio.get_event_loop(),
         auto_reconnect=True,
         reconnect_base=0.01,
@@ -74,7 +111,7 @@ def _make_ws_client(port, sink_factory, states, logs=None, **kw):
 class TestReconnect:
     def test_reconnect_after_server_close_and_reopen(self):
         async def go():
-            sink_factory = _SinkFactory()
+            engine_factory = _EngineFactory()
             states = []
             logs = []
             handler_call = [0]
@@ -95,7 +132,7 @@ class TestReconnect:
 
             async with websockets.serve(handler, "127.0.0.1", 0) as server:
                 port = server.sockets[0].getsockname()[1]
-                ws = _make_ws_client(port, sink_factory, states, logs)
+                ws = _make_ws_client(port, engine_factory, states, logs)
 
                 ok = await ws.connect()
                 assert ok is True
@@ -123,8 +160,8 @@ class TestReconnect:
                 await ws.speak("テスト2")
                 await asyncio.sleep(0.2)
 
-                assert sink_factory.last is not None
-                rec = sink_factory.last.records
+                assert engine_factory.engine is not None
+                rec = engine_factory.engine.records
                 assert any(r[0] == "feed" for r in rec)
 
                 reconnecting_events = [s for s in states if s[0] == "reconnecting"]
@@ -148,12 +185,9 @@ class TestReconnect:
 
             async with websockets.serve(handler, "127.0.0.1", 0) as server:
                 port = server.sockets[0].getsockname()[1]
-                ws = _make_ws_client(port, _SinkFactory(), states)
+                ws = _make_ws_client(port, _EngineFactory(), states)
 
-                ok = await ws.connect()
-                assert ok
-
-                await ws.close()
+                ok = await ws.close()
 
                 await asyncio.sleep(0.3)
 
@@ -174,7 +208,7 @@ class TestReconnect:
 
             async with websockets.serve(handler, "127.0.0.1", 0) as server:
                 port = server.sockets[0].getsockname()[1]
-                ws = _make_ws_client(port, _SinkFactory(), [])
+                ws = _make_ws_client(port, _EngineFactory(), [])
 
                 ok = await ws.connect()
                 assert ok
@@ -203,7 +237,7 @@ class TestReconnect:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=lambda m: None,
                     on_state=lambda e, p=None: states.append((e, p)),
-                    sink_factory=_SinkFactory(),
+                    engine_factory=_EngineFactory(),
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -227,7 +261,7 @@ class TestReconnect:
 
             async with websockets.serve(handler, "127.0.0.1", 0) as server:
                 port = server.sockets[0].getsockname()[1]
-                ws = _make_ws_client(port, _SinkFactory(), [])
+                ws = _make_ws_client(port, _EngineFactory(), [])
 
                 ok = await ws.connect()
                 assert ok
@@ -257,7 +291,7 @@ class TestReconnect:
 
             async with websockets.serve(handler, "127.0.0.1", 0) as server:
                 port = server.sockets[0].getsockname()[1]
-                ws = _make_ws_client(port, _SinkFactory(), states)
+                ws = _make_ws_client(port, _EngineFactory(), states)
 
                 ok = await ws.connect()
                 assert ok

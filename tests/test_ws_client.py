@@ -75,6 +75,49 @@ class FakeSinkFactory:
         return sink
 
 
+class FakeEngine:
+    def __init__(self, **kwargs):
+        self.records: list[tuple] = []
+        self._loop = kwargs.get("loop")
+        self._on_log = kwargs.get("on_log")
+        self.begin_fmt = None
+        self._prewarmed = False
+
+    def prewarm(self, device):
+        self._prewarmed = True
+        self.records.append(("prewarm", device))
+
+    def begin(self, fmt, device):
+        self.begin_fmt = fmt
+        self.records.append(("begin", fmt.sample_rate, device, fmt.codec))
+
+    def feed(self, chunk):
+        self.records.append(("feed", len(chunk)))
+        return True
+
+    def end(self):
+        self.records.append(("end",))
+
+    def abort(self):
+        self.records.append(("abort",))
+
+    def close(self):
+        self.records.append(("close",))
+
+    def join(self, timeout=2.0):
+        pass
+
+
+class FakeEngineFactory:
+    def __init__(self):
+        self.engine: FakeEngine | None = None
+
+    def __call__(self, **kwargs):
+        if self.engine is None:
+            self.engine = FakeEngine(**kwargs)
+        return self.engine
+
+
 def _run_test(coroutine):
     return asyncio.run(coroutine)
 
@@ -82,7 +125,7 @@ def _run_test(coroutine):
 class TestWSClient:
     def test_connect_and_speak(self):
         async def go():
-            sink_factory = FakeSinkFactory()
+            engine_factory = FakeEngineFactory()
             received: list = []
 
             ready_msg = Ready(
@@ -113,7 +156,7 @@ class TestWSClient:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=lambda m: None,
                     on_state=lambda e, p=None: None,
-                    sink_factory=sink_factory,
+                    engine_factory=engine_factory,
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -123,8 +166,8 @@ class TestWSClient:
                 await ws.speak("テスト")
                 await asyncio.sleep(0.2)
 
-                assert sink_factory.last_sink is not None
-                rec = sink_factory.last_sink.records
+                assert engine_factory.engine is not None
+                rec = engine_factory.engine.records
                 assert any(r[0] == "begin" for r in rec)
                 assert any(r[0] == "feed" for r in rec)
                 assert any(r[0] == "end" for r in rec)
@@ -135,7 +178,7 @@ class TestWSClient:
 
     def test_sideband_error_continues(self):
         async def go():
-            sink_factory = FakeSinkFactory()
+            engine_factory = FakeEngineFactory()
 
             async def handler(websocket):
                 async for raw in websocket:
@@ -158,7 +201,7 @@ class TestWSClient:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=lambda m: None,
                     on_state=lambda e, p=None: None,
-                    sink_factory=sink_factory,
+                    engine_factory=engine_factory,
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -166,7 +209,7 @@ class TestWSClient:
                 await ws.speak("テスト")
                 await asyncio.sleep(0.3)
 
-                rec = sink_factory.last_sink.records
+                rec = engine_factory.engine.records
                 assert not any(r[0] == "abort" for r in rec)
 
                 await ws.close()
@@ -175,7 +218,7 @@ class TestWSClient:
 
     def test_terminal_error_aborts(self):
         async def go():
-            sink_factory = FakeSinkFactory()
+            engine_factory = FakeEngineFactory()
 
             async def handler(websocket):
                 async for raw in websocket:
@@ -193,7 +236,7 @@ class TestWSClient:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=lambda m: None,
                     on_state=lambda e, p=None: None,
-                    sink_factory=sink_factory,
+                    engine_factory=engine_factory,
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -201,8 +244,8 @@ class TestWSClient:
                 await ws.speak("テスト")
                 await asyncio.sleep(0.2)
 
-                if sink_factory.last_sink is not None:
-                    rec = sink_factory.last_sink.records
+                if engine_factory.engine is not None:
+                    rec = engine_factory.engine.records
                     assert any(r[0] == "abort" for r in rec)
 
                 await ws.close()
@@ -211,7 +254,7 @@ class TestWSClient:
 
     def test_cancel_discards_binary_and_no_end(self):
         async def go():
-            sink_factory = FakeSinkFactory()
+            engine_factory = FakeEngineFactory()
             cancel_event = asyncio.Event()
             speak_id = [""]
 
@@ -251,7 +294,7 @@ class TestWSClient:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=lambda m: None,
                     on_state=lambda e, p=None: None,
-                    sink_factory=sink_factory,
+                    engine_factory=engine_factory,
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -261,7 +304,7 @@ class TestWSClient:
                 await ws.cancel()
                 await asyncio.sleep(0.3)
 
-                rec = sink_factory.last_sink.records
+                rec = engine_factory.engine.records
                 assert not any(r[0] == "end" for r in rec)
                 assert any(r[0] == "abort" for r in rec)
 
@@ -344,7 +387,7 @@ class TestWSClient:
 
     def test_speak_send_failure_rollback(self):
         async def go():
-            sink_factory = FakeSinkFactory()
+            engine_factory = FakeEngineFactory()
 
             async def handler(websocket):
                 async for raw in websocket:
@@ -362,7 +405,7 @@ class TestWSClient:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=logs.append,
                     on_state=lambda e, p=None: states.append((e, p)),
-                    sink_factory=sink_factory,
+                    engine_factory=engine_factory,
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -416,7 +459,7 @@ class TestWSClientSTT:
 
             async with websockets.serve(handler, "127.0.0.1", 0) as server:
                 port = server.sockets[0].getsockname()[1]
-                sink_factory = FakeSinkFactory()
+                engine_factory = FakeEngineFactory()
                 logs: list[str] = []
                 states: list[tuple] = []
 
@@ -424,7 +467,7 @@ class TestWSClientSTT:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=logs.append,
                     on_state=lambda e, p=None: states.append((e, p)),
-                    sink_factory=sink_factory,
+                    engine_factory=engine_factory,
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -447,8 +490,8 @@ class TestWSClientSTT:
                 assert len(transcript_states) == 1
                 assert transcript_states[0][1] == "こんにちは"
 
-                assert sink_factory.last_sink is not None
-                rec = sink_factory.last_sink.records
+                assert engine_factory.engine is not None
+                rec = engine_factory.engine.records
                 assert any(r[0] == "begin" for r in rec)
                 assert any(r[0] == "feed" for r in rec)
                 assert any(r[0] == "end" for r in rec)
@@ -473,14 +516,14 @@ class TestWSClientSTT:
 
             async with websockets.serve(handler, "127.0.0.1", 0) as server:
                 port = server.sockets[0].getsockname()[1]
-                sink_factory = FakeSinkFactory()
+                engine_factory = FakeEngineFactory()
                 states: list[tuple] = []
 
                 ws = WSClient(
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=lambda m: None,
                     on_state=lambda e, p=None: states.append((e, p)),
-                    sink_factory=sink_factory,
+                    engine_factory=FakeEngineFactory(),
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -489,7 +532,6 @@ class TestWSClientSTT:
                 await asyncio.sleep(0.3)
 
                 assert ws._active_id is None
-                assert sink_factory.last_sink is None
                 idle_events = [s for s in states if s[0] == "idle"]
                 assert len(idle_events) >= 1
 
@@ -520,7 +562,7 @@ class TestWSClientSTT:
 
             async with websockets.serve(handler, "127.0.0.1", 0) as server:
                 port = server.sockets[0].getsockname()[1]
-                sink_factory = FakeSinkFactory()
+                engine_factory = FakeEngineFactory()
                 logs: list[str] = []
                 states: list[tuple] = []
 
@@ -528,7 +570,7 @@ class TestWSClientSTT:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=logs.append,
                     on_state=lambda e, p=None: states.append((e, p)),
-                    sink_factory=sink_factory,
+                    engine_factory=engine_factory,
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -561,7 +603,7 @@ class TestWSClientSTT:
 
             async with websockets.serve(handler, "127.0.0.1", 0) as server:
                 port = server.sockets[0].getsockname()[1]
-                sink_factory = FakeSinkFactory()
+                engine_factory = FakeEngineFactory()
                 logs: list[str] = []
                 states: list[tuple] = []
 
@@ -569,7 +611,7 @@ class TestWSClientSTT:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=logs.append,
                     on_state=lambda e, p=None: states.append((e, p)),
-                    sink_factory=sink_factory,
+                    engine_factory=engine_factory,
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -621,7 +663,7 @@ class TestWSClientSTT:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=logs.append,
                     on_state=lambda e, p=None: states.append((e, p)),
-                    sink_factory=FakeSinkFactory(),
+                    engine_factory=FakeEngineFactory(),
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -665,7 +707,7 @@ class TestWSClientSTT:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=lambda m: None,
                     on_state=lambda e, p=None: None,
-                    sink_factory=FakeSinkFactory(),
+                    engine_factory=FakeEngineFactory(),
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                     stt_format=AudioFormatPayload(codec="pcm_s16le", sample_rate=16000, channels=2),
@@ -704,7 +746,7 @@ class TestWSClientSTT:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=logs.append,
                     on_state=lambda e, p=None: None,
-                    sink_factory=FakeSinkFactory(),
+                    engine_factory=FakeEngineFactory(),
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -748,14 +790,13 @@ class TestWSClientSTT:
 
             async with websockets.serve(handler, "127.0.0.1", 0) as server:
                 port = server.sockets[0].getsockname()[1]
-                sink_factory = FakeSinkFactory()
                 states: list[tuple] = []
 
                 ws = WSClient(
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=lambda m: None,
                     on_state=lambda e, p=None: states.append((e, p)),
-                    sink_factory=sink_factory,
+                    engine_factory=FakeEngineFactory(),
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -793,7 +834,7 @@ class TestWSClientSTT:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=logs.append,
                     on_state=lambda e, p=None: states.append((e, p)),
-                    sink_factory=FakeSinkFactory(),
+                    engine_factory=FakeEngineFactory(),
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -844,7 +885,7 @@ class TestWSClientSTT:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=lambda m: None,
                     on_state=lambda e, p=None: states.append((e, p)),
-                    sink_factory=FakeSinkFactory(),
+                    engine_factory=FakeEngineFactory(),
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -879,7 +920,7 @@ class TestWSClientOpus:
     @pytest.mark.skipif(not opus_available(), reason="opuslib not available")
     def test_opus_decode_feeds_pcm_to_sink(self) -> None:
         async def go():
-            sink_factory = FakeSinkFactory()
+            engine_factory = FakeEngineFactory()
 
             pcm_32k = b"\x00\x00" * 32000
             enc = OpusStreamEncoder(src_rate=32000, bitrate=24000)
@@ -914,7 +955,7 @@ class TestWSClientOpus:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=lambda m: None,
                     on_state=lambda e, p=None: None,
-                    sink_factory=sink_factory,
+                    engine_factory=engine_factory,
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                     codec_pref="opus",
@@ -925,18 +966,18 @@ class TestWSClientOpus:
                 await ws.speak("テスト")
                 await asyncio.sleep(0.5)
 
-                assert sink_factory.last_sink is not None
-                sink = sink_factory.last_sink
-                assert sink.begin_fmt is not None
-                assert sink.begin_fmt.codec == "pcm_s16le"
-                assert sink.begin_fmt.sample_rate == 48000
+                assert engine_factory.engine is not None
+                engine = engine_factory.engine
+                assert engine.begin_fmt is not None
+                assert engine.begin_fmt.codec == "pcm_s16le"
+                assert engine.begin_fmt.sample_rate == 48000
 
-                feeds = [r for r in sink.records if r[0] == "feed"]
+                feeds = [r for r in engine.records if r[0] == "feed"]
                 assert len(feeds) > 0
                 for f in feeds:
                     assert f[1] == 960 * 2
 
-                assert any(r[0] == "end" for r in sink.records)
+                assert any(r[0] == "end" for r in engine.records)
 
                 await ws.close()
 
@@ -945,7 +986,7 @@ class TestWSClientOpus:
     @pytest.mark.skipif(not opus_available(), reason="opuslib not available")
     def test_opus_decode_exception_terminal(self) -> None:
         async def go():
-            sink_factory = FakeSinkFactory()
+            engine_factory = FakeEngineFactory()
             states: list[tuple] = []
             logs: list[str] = []
 
@@ -975,7 +1016,7 @@ class TestWSClientOpus:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=logs.append,
                     on_state=lambda e, p=None: states.append((e, p)),
-                    sink_factory=sink_factory,
+                    engine_factory=engine_factory,
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                     codec_pref="opus",
@@ -996,7 +1037,7 @@ class TestWSClientOpus:
 
     def test_pcm_regression_unchanged(self) -> None:
         async def go():
-            sink_factory = FakeSinkFactory()
+            engine_factory = FakeEngineFactory()
 
             async def handler(websocket):
                 async for raw in websocket:
@@ -1026,7 +1067,7 @@ class TestWSClientOpus:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=lambda m: None,
                     on_state=lambda e, p=None: None,
-                    sink_factory=sink_factory,
+                    engine_factory=engine_factory,
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                     codec_pref="pcm",
@@ -1037,13 +1078,13 @@ class TestWSClientOpus:
                 await ws.speak("テスト")
                 await asyncio.sleep(0.3)
 
-                assert sink_factory.last_sink is not None
-                sink = sink_factory.last_sink
-                assert sink.begin_fmt is not None
-                assert sink.begin_fmt.codec == "pcm_s16le"
-                assert sink.begin_fmt.sample_rate == 32000
+                assert engine_factory.engine is not None
+                engine = engine_factory.engine
+                assert engine.begin_fmt is not None
+                assert engine.begin_fmt.codec == "pcm_s16le"
+                assert engine.begin_fmt.sample_rate == 32000
 
-                feeds = [r for r in sink.records if r[0] == "feed"]
+                feeds = [r for r in engine.records if r[0] == "feed"]
                 assert len(feeds) > 0
 
                 await ws.close()
@@ -1054,7 +1095,7 @@ class TestWSClientOpus:
 class TestWSClientMetrics:
     def test_speak_metrics_emitted(self):
         async def go():
-            sink_factory = FakeSinkFactory()
+            engine_factory = FakeEngineFactory()
             states: list[tuple] = []
 
             async def handler(websocket):
@@ -1082,7 +1123,7 @@ class TestWSClientMetrics:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=lambda m: None,
                     on_state=lambda e, p=None: states.append((e, p)),
-                    sink_factory=sink_factory,
+                    engine_factory=engine_factory,
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -1112,7 +1153,7 @@ class TestWSClientMetrics:
 
     def test_utter_metrics_with_stt_ms(self):
         async def go():
-            sink_factory = FakeSinkFactory()
+            engine_factory = FakeEngineFactory()
             states: list[tuple] = []
 
             async def handler(websocket):
@@ -1144,7 +1185,7 @@ class TestWSClientMetrics:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=lambda m: None,
                     on_state=lambda e, p=None: states.append((e, p)),
-                    sink_factory=sink_factory,
+                    engine_factory=engine_factory,
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -1192,7 +1233,7 @@ class TestWSClientMetrics:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=lambda m: None,
                     on_state=lambda e, p=None: states.append((e, p)),
-                    sink_factory=FakeSinkFactory(),
+                    engine_factory=FakeEngineFactory(),
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -1233,7 +1274,7 @@ class TestWSClientMetrics:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=lambda m: None,
                     on_state=lambda e, p=None: states.append((e, p)),
-                    sink_factory=FakeSinkFactory(),
+                    engine_factory=FakeEngineFactory(),
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )
@@ -1266,7 +1307,7 @@ class TestWSClientMetrics:
                     f"ws://127.0.0.1:{port}/ws",
                     on_log=lambda m: None,
                     on_state=lambda e, p=None: None,
-                    sink_factory=FakeSinkFactory(),
+                    engine_factory=FakeEngineFactory(),
                     loop=asyncio.get_event_loop(),
                     auto_reconnect=False,
                 )

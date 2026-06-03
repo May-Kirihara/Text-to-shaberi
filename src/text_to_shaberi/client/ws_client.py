@@ -40,6 +40,7 @@ from ..common.protocol import (
     parse_message,
 )
 from .audio.devices import resolve_device
+from .audio.engine import PlaybackEngine
 from .audio.sink import PlaybackSink
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ class WSClient:
         on_state: Callable[[str, Any], None] | None = None,
         device_provider: Callable[[], Any] | None = None,
         sink_factory: Callable[..., Any] = PlaybackSink,
+        engine_factory: Callable[..., Any] = PlaybackEngine,
         loop: asyncio.AbstractEventLoop | None = None,
         default_profile: str = "",
         stt_format: AudioFormatPayload | None = None,
@@ -73,6 +75,7 @@ class WSClient:
         self._on_state = on_state
         self._device_provider = device_provider
         self._sink_factory = sink_factory
+        self._engine_factory = engine_factory
         self._loop = loop
         self._default_profile = default_profile
         self._stt_format = stt_format or AudioFormatPayload(
@@ -93,6 +96,7 @@ class WSClient:
         self._playback_id: str | None = None
         self._stt_auto_tts: bool = False
         self._sink: Any = None
+        self._engine: Any = None
         self._ready: Ready | None = None
         self._t_send: float | None = None
         self._first_chunk_logged: bool = False
@@ -225,6 +229,11 @@ class WSClient:
                 self._state("ready", msg)
                 self._state("connected")
                 self._recv_task = self._get_loop().create_task(self._recv_loop())
+                if self._engine is None:
+                    self._engine = self._engine_factory(
+                        loop=self._loop, on_log=self._on_log,
+                    )
+                self._engine.prewarm(self._resolve_device())
                 return True
             except Exception as exc:
                 self._log(f"接続失敗: {exc}")
@@ -244,6 +253,9 @@ class WSClient:
             self._sink.abort()
             await asyncio.to_thread(self._sink.join)
             self._sink = None
+        if self._engine is not None:
+            self._engine.abort()
+            await asyncio.to_thread(self._engine.join)
         await self._safe_close_ws()
         self._ready = None
 
@@ -251,6 +263,10 @@ class WSClient:
         self._user_closing = True
         self._cancel_reconnect_task()
         async with self._conn_lock:
+            if self._engine is not None:
+                self._engine.abort()
+                await asyncio.to_thread(self._engine.close)
+                self._engine = None
             await self._teardown_ws()
 
     async def reconnect(self, address: str | None = None, token: str | None = None) -> bool:
@@ -386,6 +402,8 @@ class WSClient:
         if self._active_id is None:
             self._log("cancel: active 無し")
             return
+        if self._engine is not None:
+            self._engine.abort()
         if self._sink is not None:
             self._sink.abort()
         self._cancelling = True
@@ -439,6 +457,8 @@ class WSClient:
             if self._recv_task is asyncio.current_task():
                 self._recv_task = None
             if self._active_id is not None:
+                if self._engine is not None:
+                    self._engine.abort()
                 if self._sink is not None:
                     self._sink.abort()
                 self._finish_stream()
@@ -447,7 +467,7 @@ class WSClient:
                 self._get_loop().call_soon(self._schedule_reconnect)
 
     def _on_binary(self, raw: bytes) -> None:
-        if not self._active_id or not self._playback_id or self._sink is None or self._cancelling:
+        if not self._active_id or not self._playback_id or self._cancelling:
             return
 
         if self._playback_codec == OPUS_CODEC_NAME:
@@ -455,8 +475,8 @@ class WSClient:
                 pcm = self._opus_decoder.decode(raw)
             except Exception:
                 self._log("opus decode 失敗")
-                if self._sink is not None:
-                    self._sink.abort()
+                if self._engine is not None:
+                    self._engine.abort()
                 self._cancelling = True
                 self._finish_stream()
                 self._state("error", "opus decode failed")
@@ -464,9 +484,13 @@ class WSClient:
         else:
             pcm = raw
 
-        ok = self._sink.feed(pcm)
+        sink = self._engine if self._engine is not None else self._sink
+        ok = sink.feed(pcm)
         if not ok:
-            self._sink.abort()
+            if self._engine is not None:
+                self._engine.abort()
+            if self._sink is not None:
+                self._sink.abort()
             self._cancelling = True
             self._log("再生が追いつきません")
 
@@ -523,22 +547,28 @@ class WSClient:
                         codec="pcm_s16le", sample_rate=48000, channels=1
                     )
                     device = self._resolve_device()
-                    self._sink = self._sink_factory(
-                        loop=self._loop,
-                        on_log=self._on_log,
-                        prime_ms=self._prime_ms,
-                    )
-                    self._sink.begin(sink_fmt, device)
+                    if self._engine is not None:
+                        self._engine.begin(sink_fmt, device)
+                    else:
+                        self._sink = self._sink_factory(
+                            loop=self._loop,
+                            on_log=self._on_log,
+                            prime_ms=self._prime_ms,
+                        )
+                        self._sink.begin(sink_fmt, device)
                 else:
                     self._playback_codec = "pcm_s16le"
                     self._opus_decoder = None
                     device = self._resolve_device()
-                    self._sink = self._sink_factory(
-                        loop=self._loop,
-                        on_log=self._on_log,
-                        prime_ms=self._prime_ms,
-                    )
-                    self._sink.begin(fmt, device)
+                    if self._engine is not None:
+                        self._engine.begin(fmt, device)
+                    else:
+                        self._sink = self._sink_factory(
+                            loop=self._loop,
+                            on_log=self._on_log,
+                            prime_ms=self._prime_ms,
+                        )
+                        self._sink.begin(fmt, device)
             else:
                 self._log(f"side-band audio_begin (id={msg.id})")
             return
@@ -569,6 +599,8 @@ class WSClient:
                 if self._cancelling:
                     self._finish_stream()
                 else:
+                    if self._engine is not None:
+                        self._engine.end()
                     if self._sink is not None:
                         self._sink.end()
                     self._finish_stream()
@@ -590,6 +622,8 @@ class WSClient:
                 if self._cancelling:
                     self._finish_stream()
                 else:
+                    if self._engine is not None:
+                        self._engine.abort()
                     if self._sink is not None:
                         self._sink.abort()
                     self._finish_stream()

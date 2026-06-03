@@ -18,6 +18,17 @@ from ...common.pcm import _pcm_to_float32, bytes_per_sample, split_full_samples
 logger = logging.getLogger(__name__)
 
 
+def flush_resampler(rs: Any, channels: int = 1) -> np.ndarray | None:
+    if rs is None:
+        return None
+    empty = (
+        np.empty((0,), dtype=np.float32)
+        if channels == 1
+        else np.empty((0, channels), dtype=np.float32)
+    )
+    return rs.resample_chunk(empty, last=True)
+
+
 def _device_samplerate(sd, device: int | None) -> int:
     info = sd.query_devices(kind="output") if device is None else sd.query_devices(device)
     return int(info["default_samplerate"])
@@ -213,12 +224,7 @@ class StreamingPlayer:
 
             tail: np.ndarray | None = None
             if self._resampler is not None:
-                empty = (
-                    np.empty((0,), dtype=np.float32)
-                    if self._channels == 1
-                    else np.empty((0, self._channels), dtype=np.float32)
-                )
-                tail = self._resampler.resample_chunk(empty, last=True)
+                tail = flush_resampler(self._resampler, self._channels)
 
             chunks: list[np.ndarray] = []
             if self._preroll:
