@@ -4,6 +4,7 @@ pytest-asyncio 不使用。asyncio.run で完結。
 websockets.serve で fake サーバを立てる。
 C1: speak/side-band/terminal/cancel/token/default_profile/rollback。
 C2: STT送信/自動tts連鎖/空文字起こし/エラー/キャンセル/atomic送信/自動tts降格。
+X1: opus decode 経路 / sink begin codec==pcm_s16le / decode 例外 terminal。
 """
 from __future__ import annotations
 
@@ -16,6 +17,12 @@ import pytest
 import websockets
 
 from text_to_shaberi.client.ws_client import WSClient
+from text_to_shaberi.common.opus_codec import (
+    OPUS_CODEC_NAME,
+    OpusStreamEncoder,
+    opus_available,
+    opus_wire_format,
+)
 from text_to_shaberi.common.protocol import (
     AudioBegin,
     AudioEnd,
@@ -38,9 +45,11 @@ class FakeSink:
         self.records: list[tuple] = []
         self._loop = kwargs.get("loop")
         self._on_log = kwargs.get("on_log")
+        self.begin_fmt = None
 
     def begin(self, fmt, device):
-        self.records.append(("begin", fmt.sample_rate, device))
+        self.begin_fmt = fmt
+        self.records.append(("begin", fmt.sample_rate, device, fmt.codec))
 
     def feed(self, chunk):
         self.records.append(("feed", len(chunk)))
@@ -278,6 +287,7 @@ class TestWSClient:
                     f"ws://127.0.0.1:{port}/ws",
                     token="secret&token#test",
                     loop=asyncio.get_event_loop(),
+                    token_in_query=True,
                 )
                 ok = await ws.connect()
                 assert ok is True
@@ -842,6 +852,179 @@ class TestWSClientSTT:
                     assert cancel_idx > stt_end_idx
 
                 assert ws._active_id is None
+
+                await ws.close()
+
+        _run_test(go())
+
+
+class TestWSClientOpus:
+    @pytest.mark.skipif(not opus_available(), reason="opuslib not available")
+    def test_opus_decode_feeds_pcm_to_sink(self) -> None:
+        async def go():
+            sink_factory = FakeSinkFactory()
+
+            pcm_32k = b"\x00\x00" * 32000
+            enc = OpusStreamEncoder(src_rate=32000, bitrate=24000)
+            opus_packets = enc.feed(pcm_32k) + enc.flush()
+            assert len(opus_packets) > 0
+
+            opus_fmt = opus_wire_format()
+
+            async def handler(websocket):
+                async for raw in websocket:
+                    if isinstance(raw, str):
+                        msg = parse_message(json.loads(raw))
+                        if isinstance(msg, Hello):
+                            await websocket.send(Ready(
+                                session_id="t",
+                                codec=OPUS_CODEC_NAME,
+                                tts=AudioFormatPayload(codec="pcm_s16le", sample_rate=32000, channels=1),
+                                profiles=[],
+                            ).model_dump_json())
+                        elif isinstance(msg, Speak):
+                            await websocket.send(
+                                AudioBegin(id=msg.id, format=opus_fmt).model_dump_json()
+                            )
+                            for pkt in opus_packets:
+                                await websocket.send(pkt)
+                            await websocket.send(AudioEnd(id=msg.id).model_dump_json())
+
+            async with websockets.serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+
+                ws = WSClient(
+                    f"ws://127.0.0.1:{port}/ws",
+                    on_log=lambda m: None,
+                    on_state=lambda e, p=None: None,
+                    sink_factory=sink_factory,
+                    loop=asyncio.get_event_loop(),
+                    codec_pref="opus",
+                )
+                ok = await ws.connect()
+                assert ok is True
+
+                await ws.speak("テスト")
+                await asyncio.sleep(0.5)
+
+                assert sink_factory.last_sink is not None
+                sink = sink_factory.last_sink
+                assert sink.begin_fmt is not None
+                assert sink.begin_fmt.codec == "pcm_s16le"
+                assert sink.begin_fmt.sample_rate == 48000
+
+                feeds = [r for r in sink.records if r[0] == "feed"]
+                assert len(feeds) > 0
+                for f in feeds:
+                    assert f[1] == 960 * 2
+
+                assert any(r[0] == "end" for r in sink.records)
+
+                await ws.close()
+
+        _run_test(go())
+
+    @pytest.mark.skipif(not opus_available(), reason="opuslib not available")
+    def test_opus_decode_exception_terminal(self) -> None:
+        async def go():
+            sink_factory = FakeSinkFactory()
+            states: list[tuple] = []
+            logs: list[str] = []
+
+            opus_fmt = opus_wire_format()
+
+            async def handler(websocket):
+                async for raw in websocket:
+                    if isinstance(raw, str):
+                        msg = parse_message(json.loads(raw))
+                        if isinstance(msg, Hello):
+                            await websocket.send(Ready(
+                                session_id="t",
+                                codec=OPUS_CODEC_NAME,
+                                profiles=[],
+                            ).model_dump_json())
+                        elif isinstance(msg, Speak):
+                            await websocket.send(
+                                AudioBegin(id=msg.id, format=opus_fmt).model_dump_json()
+                            )
+                            await websocket.send(b"\xff\xff\xff\xff\xff\xff")
+                            await websocket.send(AudioEnd(id=msg.id).model_dump_json())
+
+            async with websockets.serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+
+                ws = WSClient(
+                    f"ws://127.0.0.1:{port}/ws",
+                    on_log=logs.append,
+                    on_state=lambda e, p=None: states.append((e, p)),
+                    sink_factory=sink_factory,
+                    loop=asyncio.get_event_loop(),
+                    codec_pref="opus",
+                )
+                ok = await ws.connect()
+                assert ok is True
+
+                await ws.speak("テスト")
+                await asyncio.sleep(0.5)
+
+                assert ws._active_id is None
+                error_states = [s for s in states if s[0] == "error"]
+                assert len(error_states) >= 1
+
+                await ws.close()
+
+        _run_test(go())
+
+    def test_pcm_regression_unchanged(self) -> None:
+        async def go():
+            sink_factory = FakeSinkFactory()
+
+            async def handler(websocket):
+                async for raw in websocket:
+                    if isinstance(raw, str):
+                        msg = parse_message(json.loads(raw))
+                        if isinstance(msg, Hello):
+                            await websocket.send(Ready(
+                                session_id="t",
+                                codec="pcm_s16le",
+                                tts=AudioFormatPayload(codec="pcm_s16le", sample_rate=32000, channels=1),
+                                profiles=[],
+                            ).model_dump_json())
+                        elif isinstance(msg, Speak):
+                            await websocket.send(
+                                AudioBegin(
+                                    id=msg.id,
+                                    format=AudioFormatPayload(codec="pcm_s16le", sample_rate=32000, channels=1),
+                                ).model_dump_json()
+                            )
+                            await websocket.send(b"\x00\x00" * 100)
+                            await websocket.send(AudioEnd(id=msg.id).model_dump_json())
+
+            async with websockets.serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+
+                ws = WSClient(
+                    f"ws://127.0.0.1:{port}/ws",
+                    on_log=lambda m: None,
+                    on_state=lambda e, p=None: None,
+                    sink_factory=sink_factory,
+                    loop=asyncio.get_event_loop(),
+                    codec_pref="pcm",
+                )
+                ok = await ws.connect()
+                assert ok is True
+
+                await ws.speak("テスト")
+                await asyncio.sleep(0.3)
+
+                assert sink_factory.last_sink is not None
+                sink = sink_factory.last_sink
+                assert sink.begin_fmt is not None
+                assert sink.begin_fmt.codec == "pcm_s16le"
+                assert sink.begin_fmt.sample_rate == 32000
+
+                feeds = [r for r in sink.records if r[0] == "feed"]
+                assert len(feeds) > 0
 
                 await ws.close()
 

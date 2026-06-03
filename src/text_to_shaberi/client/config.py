@@ -11,6 +11,10 @@ from ..common.config import _only, load_toml
 class ServerConfig:
     address: str = "ws://127.0.0.1:8765/ws"
     token: str = ""
+    codec: str = "opus"
+    tls_insecure: bool = False
+    tls_cafile: str = ""
+    token_in_query: bool = False
 
 
 @dataclass(slots=True)

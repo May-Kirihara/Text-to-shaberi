@@ -29,11 +29,16 @@ def _load_output_devices() -> list:
 
 
 def run_check(config_path: str | Path) -> None:
+    from ..common.opus_codec import opus_available
+
     cfg = load_client_config(config_path)
+    avail = opus_available()
 
     print("== client config ==")
     print("  server.address :", cfg.server.address)
     print("  server.token   :", "(set)" if cfg.server.token else "(empty)")
+    print("  server.codec   :", cfg.server.codec)
+    print("  opus available :", avail)
     print("  output.device  :", cfg.output.device)
     print("  mic            :", f"{cfg.mic.sample_rate}Hz {cfg.mic.channels}ch vad={cfg.mic.vad.engine}")
     print("  ui.input_method:", cfg.ui.input_method)
@@ -129,6 +134,10 @@ def run_gui(config_path: str | Path) -> None:
             sample_rate=cfg.mic.sample_rate,
             channels=cfg.mic.channels,
         ),
+        codec_pref=cfg.server.codec,
+        tls_insecure=cfg.server.tls_insecure,
+        tls_cafile=cfg.server.tls_cafile,
+        token_in_query=cfg.server.token_in_query,
     )
 
     mic_holder: list = [None]

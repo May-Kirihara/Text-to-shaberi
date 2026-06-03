@@ -1,7 +1,8 @@
-"""WebSocket クライアント（C1 本実装 + C2 STT/auto_tts 拡張）。
+"""WebSocket クライアント（C1 本実装 + C2 STT/auto_tts 拡張 + X1 Opus/Security）。
 
 hello→ready、speak→audio_begin+binary×N+audio_end、cancel→stopped を処理。
 C2: utter(pcm)→stt_begin+binary×N+stt_end→transcript→auto_tts audio 連鎖。
+X1: opus caps, Bearer token, wss/TLS ssl, opus decode, sink PCM separation.
 受信(asyncio)→再生(別スレッド) を PlaybackSink で橋渡し。
 """
 from __future__ import annotations
@@ -9,12 +10,19 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import ssl
 import uuid
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from typing import Any, Callable
 
 import websockets
 
+from ..common.opus_codec import (
+    OPUS_CODEC_NAME,
+    OpusStreamDecoder,
+    opus_available,
+    opus_wire_format,
+)
 from ..common.protocol import (
     AudioBegin,
     AudioEnd,
@@ -49,6 +57,10 @@ class WSClient:
         loop: asyncio.AbstractEventLoop | None = None,
         default_profile: str = "",
         stt_format: AudioFormatPayload | None = None,
+        codec_pref: str = "opus",
+        tls_insecure: bool = False,
+        tls_cafile: str = "",
+        token_in_query: bool = False,
     ) -> None:
         self._address = address
         self._token = token
@@ -61,6 +73,10 @@ class WSClient:
         self._stt_format = stt_format or AudioFormatPayload(
             codec="pcm_s16le", sample_rate=16000, channels=1
         )
+        self._codec_pref = codec_pref
+        self._tls_insecure = tls_insecure
+        self._tls_cafile = tls_cafile
+        self._token_in_query = token_in_query
 
         self._ws: Any = None
         self._recv_task: asyncio.Task | None = None
@@ -75,6 +91,8 @@ class WSClient:
         self._profiles: list = []
         self._send_lock = asyncio.Lock()
         self._auto_tts_warned = False
+        self._playback_codec: str | None = None
+        self._opus_decoder: OpusStreamDecoder | None = None
 
     def _log(self, msg: str) -> None:
         if self._on_log:
@@ -86,10 +104,29 @@ class WSClient:
         if self._on_state:
             self._on_state(event, payload)
 
+    def _client_codecs(self) -> list[str]:
+        if opus_available() and self._codec_pref == "opus":
+            return [OPUS_CODEC_NAME, "pcm_s16le"]
+        return ["pcm_s16le"]
+
+    def _build_ssl_context(self) -> Any:
+        parts = urlsplit(self._address)
+        if parts.scheme != "wss":
+            return None
+        if self._tls_cafile:
+            ctx = ssl.create_default_context(cafile=self._tls_cafile)
+        elif self._tls_insecure:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        else:
+            ctx = ssl.create_default_context()
+        return ctx
+
     def _build_url(self) -> str:
         parts = urlsplit(self._address)
         query_params = parse_qsl(parts.query)
-        if self._token:
+        if self._token and self._token_in_query:
             query_params = [(k, v) for k, v in query_params if k != "token"]
             query_params.append(("token", self._token))
         new_query = urlencode(query_params)
@@ -98,11 +135,19 @@ class WSClient:
     async def connect(self) -> bool:
         try:
             url = self._build_url()
-            self._ws = await websockets.connect(url)
+            connect_kwargs: dict[str, Any] = {}
+            if self._token:
+                connect_kwargs["additional_headers"] = {
+                    "Authorization": f"Bearer {self._token}"
+                }
+            ssl_ctx = self._build_ssl_context()
+            if ssl_ctx is not None:
+                connect_kwargs["ssl"] = ssl_ctx
+            self._ws = await websockets.connect(url, **connect_kwargs)
             await self._send(Hello(
                 client_name="text-to-shaberi",
                 client_id="",
-                caps={"codecs": ["pcm_s16le"]},
+                caps={"codecs": self._client_codecs()},
             ))
             raw = await asyncio.wait_for(self._ws.recv(), timeout=10.0)
             msg = parse_message(json.loads(raw))
@@ -289,7 +334,21 @@ class WSClient:
         if not self._active_id or not self._playback_id or self._sink is None or self._cancelling:
             return
 
-        ok = self._sink.feed(raw)
+        if self._playback_codec == OPUS_CODEC_NAME:
+            try:
+                pcm = self._opus_decoder.decode(raw)
+            except Exception:
+                self._log("opus decode 失敗")
+                if self._sink is not None:
+                    self._sink.abort()
+                self._cancelling = True
+                self._finish_stream()
+                self._state("error", "opus decode failed")
+                return
+        else:
+            pcm = raw
+
+        ok = self._sink.feed(pcm)
         if not ok:
             self._sink.abort()
             self._cancelling = True
@@ -328,12 +387,35 @@ class WSClient:
                 fmt = msg.format
                 if fmt is None and self._ready is not None:
                     fmt = self._ready.tts
-                device = self._resolve_device()
-                self._sink = self._sink_factory(
-                    loop=self._loop,
-                    on_log=self._on_log,
-                )
-                self._sink.begin(fmt, device)
+
+                if fmt is not None and fmt.codec == OPUS_CODEC_NAME:
+                    expected = opus_wire_format()
+                    if (
+                        fmt.codec != expected.codec
+                        or fmt.sample_rate != expected.sample_rate
+                        or fmt.channels != expected.channels
+                    ):
+                        self._log("AudioBegin format が opus_wire_format と不一致")
+                    self._playback_codec = OPUS_CODEC_NAME
+                    self._opus_decoder = OpusStreamDecoder()
+                    sink_fmt = AudioFormatPayload(
+                        codec="pcm_s16le", sample_rate=48000, channels=1
+                    )
+                    device = self._resolve_device()
+                    self._sink = self._sink_factory(
+                        loop=self._loop,
+                        on_log=self._on_log,
+                    )
+                    self._sink.begin(sink_fmt, device)
+                else:
+                    self._playback_codec = "pcm_s16le"
+                    self._opus_decoder = None
+                    device = self._resolve_device()
+                    self._sink = self._sink_factory(
+                        loop=self._loop,
+                        on_log=self._on_log,
+                    )
+                    self._sink.begin(fmt, device)
             else:
                 self._log(f"side-band audio_begin (id={msg.id})")
             return
@@ -392,4 +474,6 @@ class WSClient:
         self._stt_auto_tts = False
         self._cancelling = False
         self._first_chunk_logged = False
+        self._playback_codec = None
+        self._opus_decoder = None
         self._state("idle")

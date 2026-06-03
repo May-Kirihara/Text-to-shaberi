@@ -4,6 +4,10 @@
 [server]
 address = "ws://127.0.0.1:8765/ws"
 token   = ""                     # 空=ローカルのみ。外部接続時はサーバと同じ token を設定
+codec = "opus"                   # opus | pcm。opuslib 不在なら自動 pcm
+tls_insecure = false             # true で自己署名証明書を検証無効（LAN検証用）
+tls_cafile = ""                  # カスタム CA 証明書パス
+token_in_query = false           # true で legacy ?token= query も付与（Bearer 既定）
 
 [output]
 device   = "default"             # "default" | デバイス名の一部 | index

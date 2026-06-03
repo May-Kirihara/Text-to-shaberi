@@ -12,8 +12,15 @@ import time
 from dataclasses import dataclass
 from uuid import uuid4
 
+import numpy as np
 from fastapi import WebSocket
 
+from ..common.opus_codec import (
+    OPUS_CODEC_NAME,
+    OpusStreamEncoder,
+    opus_available,
+    opus_wire_format,
+)
 from ..common.pcm import _pcm_to_float32, bytes_per_sample
 from ..common.protocol import (
     AudioBegin,
@@ -68,6 +75,7 @@ class Session:
         self.stt_auto_tts: bool = False
         self._send_lock = asyncio.Lock()
         self._handshake_done = False
+        self.codec: str = "pcm_s16le"
 
     # ------------------------------------------------------------------
     # busy / capture helpers
@@ -138,7 +146,7 @@ class Session:
     # ハンドシェイク
     # ------------------------------------------------------------------
     async def _handshake(self) -> None:
-        from .config import ServerConfig
+        from .config import ServerConfig, normalize_transport_codec
 
         cfg: ServerConfig = self.state.config
         parsed = await self._receive_message()
@@ -161,18 +169,54 @@ class Session:
             await self._close_after_error(None, f"failed to load active profile '{profile_name}': {exc}")
             return
 
+        transport_codec = normalize_transport_codec(cfg.transport.codec)
+        client_caps = parsed.caps.get("codecs", []) if isinstance(parsed.caps, dict) else []
+        avail = opus_available()
+
+        if (
+            OPUS_CODEC_NAME in client_caps
+            and transport_codec == OPUS_CODEC_NAME
+            and avail
+        ):
+            chosen = OPUS_CODEC_NAME
+        else:
+            chosen = "pcm_s16le"
+
+        if transport_codec == OPUS_CODEC_NAME and chosen != OPUS_CODEC_NAME:
+            reasons = []
+            if OPUS_CODEC_NAME not in client_caps:
+                reasons.append("client caps non-opus")
+            if not avail:
+                reasons.append("opuslib unavailable")
+            logger.warning(
+                "[%s] transport.codec=opus だが pcm にフォールバック: %s",
+                self.session_id,
+                ", ".join(reasons),
+            )
+
+        self.codec = chosen
+
         fmt = AudioFormatPayload(
             codec="pcm_s16le",
             sample_rate=active_profile.audio.sample_rate,
             channels=active_profile.audio.channels,
         )
+        limits: dict[str, Any] = {
+            "max_chunk_bytes": 65536,
+            "opus": {
+                "available": avail,
+                "rate": 48000,
+                "frame_ms": 20,
+                "bitrate": cfg.transport.opus_bitrate,
+            },
+        }
         ready = Ready(
             session_id=self.session_id,
             server_time=time.time(),
-            codec="pcm_s16le",
+            codec=chosen,
             tts=fmt,
             profiles=self.state.available_profiles,
-            limits={"max_chunk_bytes": 65536},
+            limits=limits,
             features={"auto_tts": True},
         )
         await self._send_model(ready)
@@ -251,28 +295,75 @@ class Session:
         parent_id: str | None = None,
         manage_active: bool = True,
     ) -> None:
-        fmt = AudioFormatPayload(
-            codec="pcm_s16le",
-            sample_rate=profile.audio.sample_rate,
-            channels=profile.audio.channels,
-        )
-        await self._send_model(AudioBegin(id=stream_id, parent_id=parent_id, format=fmt))
-        try:
-            async for chunk in self.state.tts_client.stream(profile, text):
-                await self._send_bytes(chunk)
-            await self._send_model(AudioEnd(id=stream_id))
-        except asyncio.CancelledError:
-            await self._send_stopped_best_effort(stream_id)
-            raise
-        except Exception as exc:
-            await self._send_model(ErrorMsg(id=stream_id, message=repr(exc)))
-        finally:
-            if manage_active:
-                task = asyncio.current_task()
-                if self.active_task is task and self.active_stream_id == stream_id:
-                    self.active_task = None
-                    self.active_stream_id = None
-                    self.active_parent_id = None
+        from .config import ServerConfig
+
+        cfg: ServerConfig = self.state.config
+
+        if self.codec == OPUS_CODEC_NAME:
+            fmt = opus_wire_format()
+            await self._send_model(AudioBegin(id=stream_id, parent_id=parent_id, format=fmt))
+            try:
+                enc = OpusStreamEncoder(
+                    src_rate=profile.audio.sample_rate,
+                    bitrate=cfg.transport.opus_bitrate,
+                )
+                src_channels = profile.audio.channels
+                src_codec = profile.audio.encoding or "pcm_s16le"
+                async for chunk in self.state.tts_client.stream(profile, text):
+                    mono = self._to_mono_int16(chunk, src_codec, src_channels)
+                    for pkt in enc.feed(mono):
+                        await self._send_bytes(pkt)
+                for pkt in enc.flush():
+                    await self._send_bytes(pkt)
+                await self._send_model(AudioEnd(id=stream_id))
+            except asyncio.CancelledError:
+                await self._send_stopped_best_effort(stream_id)
+                raise
+            except Exception as exc:
+                await self._send_model(ErrorMsg(id=stream_id, message=repr(exc)))
+            finally:
+                if manage_active:
+                    task = asyncio.current_task()
+                    if self.active_task is task and self.active_stream_id == stream_id:
+                        self.active_task = None
+                        self.active_stream_id = None
+                        self.active_parent_id = None
+        else:
+            fmt = AudioFormatPayload(
+                codec="pcm_s16le",
+                sample_rate=profile.audio.sample_rate,
+                channels=profile.audio.channels,
+            )
+            await self._send_model(AudioBegin(id=stream_id, parent_id=parent_id, format=fmt))
+            try:
+                async for chunk in self.state.tts_client.stream(profile, text):
+                    await self._send_bytes(chunk)
+                await self._send_model(AudioEnd(id=stream_id))
+            except asyncio.CancelledError:
+                await self._send_stopped_best_effort(stream_id)
+                raise
+            except Exception as exc:
+                await self._send_model(ErrorMsg(id=stream_id, message=repr(exc)))
+            finally:
+                if manage_active:
+                    task = asyncio.current_task()
+                    if self.active_task is task and self.active_stream_id == stream_id:
+                        self.active_task = None
+                        self.active_stream_id = None
+                        self.active_parent_id = None
+
+    @staticmethod
+    def _to_mono_int16(chunk: bytes, codec: str, channels: int) -> bytes:
+        if channels <= 1:
+            return chunk
+        bps = bytes_per_sample(codec)
+        n_total = len(chunk) // bps
+        n_frames = n_total // channels
+        if n_frames == 0:
+            return b""
+        arr = _pcm_to_float32(chunk, codec, channels)
+        mono = arr.mean(axis=1)
+        return (np.clip(mono, -1, 1) * 32767).astype("<i2").tobytes()
 
     # ------------------------------------------------------------------
     # stt_begin / binary / stt_end

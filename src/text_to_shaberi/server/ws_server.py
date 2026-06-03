@@ -6,6 +6,7 @@ lifespan で TTSClient / STTEngine の所有権を制御する。
 from __future__ import annotations
 
 import concurrent.futures
+import hmac
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from ..common.opus_codec import opus_available
 from ..common.protocol import ProfileInfo
 from .config import ServerConfig, load_server_config
 from .orchestrator import Session, SessionState
@@ -77,12 +79,13 @@ def create_app(
         cfg: ServerConfig = app.state.config
         token = cfg.bind.token
         if token:
-            query_token = ws.query_params.get("token", "")
-            if not query_token:
-                auth = ws.headers.get("authorization", "")
-                if auth.startswith("Bearer "):
-                    query_token = auth[7:]
-            if query_token != token:
+            presented = ""
+            auth = ws.headers.get("authorization", "")
+            if auth.startswith("Bearer "):
+                presented = auth[7:]
+            else:
+                presented = ws.query_params.get("token", "")
+            if not hmac.compare_digest(presented, token):
                 await ws.close(code=1008)
                 return
 

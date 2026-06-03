@@ -1165,6 +1165,12 @@ wheels = [
 ]
 
 [[package]]
+name = "opuslib"
+version = "3.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/46/55/826befabb29fd3902bad6d6d7308790894c7ad4d73f051728a0c53d37cd7/opuslib-3.0.1.tar.gz", hash = "sha256:2cb045e5b03e7fc50dfefe431e3404dddddbd8f5961c10c51e32dfb69a044c97", size = 8550, upload-time = "2018-01-16T06:04:42.184Z" }
+
+[[package]]
 name = "orjson"
 version = "3.11.9"
 source = { registry = "https://pypi.org/simple" }
@@ -2152,6 +2158,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },
+    { name = "opuslib" },
     { name = "pydantic" },
 ]
 
@@ -2188,6 +2195,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.4.4" },
     { name = "numpy", marker = "extra == 'client'", specifier = ">=2.4.4" },
     { name = "numpy", marker = "extra == 'server'", specifier = ">=2.4.4" },
+    { name = "opuslib", specifier = ">=3.0.1" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pyside6", marker = "extra == 'client'", specifier = ">=6.11.1" },
     { name = "qasync", marker = "extra == 'client'", specifier = ">=0.28.0" },

@@ -219,3 +219,61 @@ nvidia-smi --query-gpu=memory.used,memory.total --format=csv
 - [ ] §6：Spike A/B/C の実測値を `docs/PLAN.md §3` の暫定SLOへ反映
 
 これらが通ったら **M0（uvプロジェクト整備＋PySide6空窓＋設定/プロファイルローダ）** から実装着手。
+
+---
+
+## 9. X1: Opus コーデック ＋ TLS/セキュリティ
+
+### 9.1 自己署名 TLS 証明書（uvicorn ネイティブ TLS）
+
+```bash
+# 証明書と鍵を同時生成（CN はサーバのホスト名/IP に合わせる）
+openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout key.pem -out cert.pem -days 365 \
+  -subj "/CN=192.168.1.100"
+
+# server.toml に設定
+# [bind]
+# tls_cert = "/path/to/cert.pem"
+# tls_key  = "/path/to/key.pem"
+```
+
+クライアント側：
+- **推奨**: `client.toml` の `[server].tls_cafile` に `cert.pem` のパスを指定
+- **LAN検証用**: `[server].tls_insecure = true`（検証無効・本番非推奨）
+
+### 9.2 Windows: libopus DLL 配置
+
+`opuslib` は ctypes で `libopus.so.0`（Linux）/ `opus.dll` または `libopus-0.dll`（Windows）を探す。
+
+Windows の場合:
+1. `opus.dll` または `libopus-0.dll` を取得（[opuslib の wheel に同梱されている場合](https://pypi.org/project/opuslib/) や [Opus 公式](https://opus-codec.org/downloads/) から）
+2. DLL を **Python と同じディレクトリ** または **PATH の通ったディレクトリ** に配置
+3. 動作確認:
+   ```cmd
+   uv run python -c "from text_to_shaberi.common.opus_codec import opus_available; print(opus_available())"
+   ```
+   `True` が返れば OK。`False` の場合は DLL の配置/PATH を見直す
+
+### 9.3 リバースプロキシでの TLS 終端
+
+nginx / Caddy 等で TLS を終端する場合、サーバ側は **平文 loopback** で起動し、プロキシが `wss://` を終端する:
+
+```nginx
+# nginx 例
+server {
+    listen 443 ssl;
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    location /ws {
+        proxy_pass http://127.0.0.1:8765;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Authorization $http_authorization;
+    }
+}
+```
+
+この場合 `server.toml` は `tls_cert`/`tls_key` を空（既定）のままにする。`bind.host` は `127.0.0.1` で、プロキシが外部に晒す。

@@ -2,6 +2,8 @@
 
 client/** は server/** / torch / qwen_asr / silero_vad を import 禁止。
 server/** は PySide6 / sounddevice を import 禁止。
+common/** は torch / qwen_asr / silero_vad / PySide6 / sounddevice を import 禁止。
+opuslib / soxr はトップレベル import 禁止（遅延/factory 内のみ）。
 """
 from __future__ import annotations
 
@@ -25,6 +27,16 @@ _SERVER_FORBIDDEN = {
     "sounddevice",
 }
 
+_COMMON_FORBIDDEN = {
+    "torch",
+    "qwen_asr",
+    "silero_vad",
+    "PySide6",
+    "sounddevice",
+}
+
+_LAZY_IMPORTS = {"opuslib", "soxr"}
+
 
 def _gather_imports(directory: Path) -> list[tuple[Path, set[str], set[str]]]:
     """directory 配下の全 .py の (path, first_components, full_module_names) を返す。"""
@@ -47,6 +59,19 @@ def _gather_imports(directory: Path) -> list[tuple[Path, set[str], set[str]]]:
                     full_names.add(node.module)
         results.append((pyfile, first_parts, full_names))
     return results
+
+
+def _is_top_level_import(tree: ast.AST, module_first_part: str) -> bool:
+    """module_first_part がトップレベル（関数/メソッド/class外）で import されているか。"""
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] == module_first_part:
+                    return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module and node.module.split(".")[0] == module_first_part:
+                return True
+    return False
 
 
 class TestClientImportBoundaries:
@@ -84,6 +109,48 @@ class TestServerImportBoundaries:
             for forbidden in _SERVER_FORBIDDEN:
                 assert forbidden not in first_parts, (
                     f"{pyfile.relative_to(_SRC)} imports {forbidden}"
+                )
+
+
+class TestCommonImportBoundaries:
+    def test_common_does_not_import_forbidden(self) -> None:
+        common_dir = _SRC / "common"
+        if not common_dir.exists():
+            pytest.skip("common/ ディレクトリ不在")
+        for pyfile, first_parts, full_names in _gather_imports(common_dir):
+            for forbidden in _COMMON_FORBIDDEN:
+                assert forbidden not in first_parts, (
+                    f"{pyfile.relative_to(_SRC)} imports {forbidden}"
+                )
+
+
+class TestLazyImports:
+    def test_opuslib_not_top_level_in_common(self) -> None:
+        common_dir = _SRC / "common"
+        if not common_dir.exists():
+            pytest.skip("common/ ディレクトリ不在")
+        for pyfile in sorted(common_dir.rglob("*.py")):
+            try:
+                tree = ast.parse(pyfile.read_text(encoding="utf-8"), filename=str(pyfile))
+            except SyntaxError:
+                continue
+            for mod in _LAZY_IMPORTS:
+                assert not _is_top_level_import(tree, mod), (
+                    f"{pyfile.relative_to(_SRC)} top-level imports {mod}"
+                )
+
+    def test_soxr_not_top_level_in_common(self) -> None:
+        common_dir = _SRC / "common"
+        if not common_dir.exists():
+            pytest.skip("common/ ディレクトリ不在")
+        for pyfile in sorted(common_dir.rglob("*.py")):
+            try:
+                tree = ast.parse(pyfile.read_text(encoding="utf-8"), filename=str(pyfile))
+            except SyntaxError:
+                continue
+            for mod in _LAZY_IMPORTS:
+                assert not _is_top_level_import(tree, mod), (
+                    f"{pyfile.relative_to(_SRC)} top-level imports {mod}"
                 )
 
 
