@@ -154,6 +154,7 @@ def run_gui(config_path: str | Path) -> None:
         token_in_query=cfg.server.token_in_query,
         auto_reconnect=cfg.server.reconnect,
         reconnect_max_delay=cfg.server.reconnect_max_delay,
+        prime_ms=cfg.output.prime_ms,
     )
 
     mic_holder: list = [None]

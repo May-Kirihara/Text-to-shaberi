@@ -72,7 +72,7 @@ class TestLazyStart:
         def sf(**kwargs):
             return stream
 
-        p = StreamingPlayer(32000, stream_factory=sf, target_sr=48000, preroll_ms=80)
+        p = StreamingPlayer(32000, stream_factory=sf, target_sr=48000, preroll_ms=80, prime_ms=0)
         assert "start" not in stream.calls
 
     def test_start_called_on_first_preroll_flush(self):
@@ -85,7 +85,7 @@ class TestLazyStart:
         def rf(sr, tr, ch):
             return resampler
 
-        p = StreamingPlayer(32000, stream_factory=sf, resampler_factory=rf, target_sr=48000, preroll_ms=80)
+        p = StreamingPlayer(32000, stream_factory=sf, resampler_factory=rf, target_sr=48000, preroll_ms=80, prime_ms=0)
 
         big_chunk = _make_pcm_s16le(32000 * 200 // 1000)
         p.write_bytes(big_chunk)
@@ -104,7 +104,7 @@ class TestLazyStart:
         def rf(sr, tr, ch):
             return resampler
 
-        p = StreamingPlayer(32000, stream_factory=sf, resampler_factory=rf, target_sr=48000, preroll_ms=80)
+        p = StreamingPlayer(32000, stream_factory=sf, resampler_factory=rf, target_sr=48000, preroll_ms=80, prime_ms=0)
 
         small_chunk = _make_pcm_s16le(100)
         p.write_bytes(small_chunk)
@@ -122,13 +122,29 @@ class TestLazyStart:
         last_calls = [c for c in resample_calls if c[2] is True]
         assert len(last_calls) == 1
 
+    def test_prime_writes_silence_after_start(self):
+        # prime_ms>0 のとき、start 直後に無音 prime を最初に書く（先頭欠け対策）。
+        stream = FakeStream()
+
+        def sf(**kwargs):
+            return stream
+
+        p = StreamingPlayer(48000, stream_factory=sf, target_sr=48000, preroll_ms=80, prime_ms=100)
+        p.write_bytes(_make_pcm_s16le(4000))  # preroll(3840)を超えて start を誘発
+
+        assert "start" in stream.calls
+        writes = [c for c in stream.calls if isinstance(c, tuple) and c[0] == "write"]
+        assert writes[0][1] == 4800  # prime = 100ms @48k = 4800 samples（最初の書き込み）
+        assert any(w[1] == 4000 for w in writes)  # 実データも書かれる
+        p.close()
+
     def test_request_abort_then_close_idempotent(self):
         stream = FakeStream()
 
         def sf(**kwargs):
             return stream
 
-        p = StreamingPlayer(32000, stream_factory=sf, target_sr=32000, preroll_ms=80)
+        p = StreamingPlayer(32000, stream_factory=sf, target_sr=32000, preroll_ms=80, prime_ms=0)
 
         p.request_abort()
         assert "abort" not in stream.calls
@@ -144,7 +160,7 @@ class TestLazyStart:
         def sf(**kwargs):
             return stream
 
-        p = StreamingPlayer(32000, stream_factory=sf, target_sr=48000, preroll_ms=80)
+        p = StreamingPlayer(32000, stream_factory=sf, target_sr=48000, preroll_ms=80, prime_ms=0)
 
         big_chunk = _make_pcm_s16le(32000 * 200 // 1000)
         p.write_bytes(big_chunk)
@@ -164,7 +180,7 @@ class TestLazyStart:
         def sf(**kwargs):
             return stream
 
-        p = StreamingPlayer(32000, stream_factory=sf, target_sr=32000, preroll_ms=80)
+        p = StreamingPlayer(32000, stream_factory=sf, target_sr=32000, preroll_ms=80, prime_ms=0)
         assert p._resampler is None
 
         big_chunk = _make_pcm_s16le(32000 * 100 // 1000)
@@ -180,7 +196,7 @@ class TestLazyStart:
         def sf(**kwargs):
             return stream
 
-        p = StreamingPlayer(32000, stream_factory=sf, target_sr=32000, preroll_ms=80)
+        p = StreamingPlayer(32000, stream_factory=sf, target_sr=32000, preroll_ms=80, prime_ms=0)
         p.close()
         assert "close" in stream.calls
         assert "stop" not in stream.calls

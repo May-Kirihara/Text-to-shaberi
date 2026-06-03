@@ -23,10 +23,12 @@ class PlaybackSink:
         player_factory: Callable[..., Any] = StreamingPlayer,
         on_log: Callable[[str], None] | None = None,
         loop: Any | None = None,
+        prime_ms: int = 500,
     ) -> None:
         self._player_factory = player_factory
         self._on_log = on_log
         self._loop = loop
+        self._prime_ms = prime_ms
         self._player: Any | None = None
         self._q: queue.Queue[Any] = queue.Queue(maxsize=256)
         self._thread: threading.Thread | None = None
@@ -54,6 +56,7 @@ class PlaybackSink:
                 channels=fmt.channels,
                 device=device,
                 encoding=fmt.codec,
+                prime_ms=self._prime_ms,
             )
             self._player = player
         except Exception as exc:

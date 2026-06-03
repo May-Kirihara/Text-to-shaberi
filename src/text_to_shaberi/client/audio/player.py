@@ -70,6 +70,7 @@ class StreamingPlayer:
         device: int | None = None,
         encoding: str = "pcm_s16le",
         preroll_ms: int = 80,
+        prime_ms: int = 500,
         *,
         stream_factory=None,
         resampler_factory=None,
@@ -78,6 +79,8 @@ class StreamingPlayer:
         self._encoding = encoding
         self._channels = channels
         self._frame_bytes = bytes_per_sample(encoding) * channels
+        self._prime_ms = prime_ms
+        self._primed = False
 
         if target_sr is None:
             import sounddevice as sd
@@ -135,6 +138,21 @@ class StreamingPlayer:
         if not self._started_stream:
             self._stream.start()
             self._started_stream = True
+            # デバイス/PipeWire の起動ウォームアップで先頭音が食われるのを防ぐため、
+            # 開始直後に無音を prime して食い込み窓を無音で吸収する（先頭欠け対策）。
+            if not self._primed:
+                self._primed = True
+                if self._prime_ms > 0:
+                    n = int(self._target_sr * self._prime_ms / 1000)
+                    if n > 0:
+                        if self._channels == 1:
+                            silence = np.zeros(n, dtype=np.float32)
+                        else:
+                            silence = np.zeros((n, self._channels), dtype=np.float32)
+                        try:
+                            self._stream.write(silence)
+                        except Exception:
+                            pass
 
     def write_bytes(self, data: bytes) -> None:
         with self._lock:

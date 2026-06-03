@@ -65,6 +65,7 @@ class WSClient:
         auto_reconnect: bool = True,
         reconnect_base: float = 0.5,
         reconnect_max_delay: float = 30.0,
+        prime_ms: int = 500,
     ) -> None:
         self._address = address
         self._token = token
@@ -84,6 +85,7 @@ class WSClient:
         self._auto_reconnect = auto_reconnect
         self._reconnect_base = reconnect_base
         self._reconnect_max = reconnect_max_delay
+        self._prime_ms = prime_ms
 
         self._ws: Any = None
         self._recv_task: asyncio.Task | None = None
@@ -524,6 +526,7 @@ class WSClient:
                     self._sink = self._sink_factory(
                         loop=self._loop,
                         on_log=self._on_log,
+                        prime_ms=self._prime_ms,
                     )
                     self._sink.begin(sink_fmt, device)
                 else:
@@ -533,6 +536,7 @@ class WSClient:
                     self._sink = self._sink_factory(
                         loop=self._loop,
                         on_log=self._on_log,
+                        prime_ms=self._prime_ms,
                     )
                     self._sink.begin(fmt, device)
             else:

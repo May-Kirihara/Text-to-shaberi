@@ -14,6 +14,8 @@ reconnect_max_delay = 30         # X2a: 再接続バックオフ上限（秒）
 [output]
 device   = "default"             # "default" | デバイス名の一部 | index
 resample = "auto"                # 出力デバイスrateへ soxr 変換
+prime_ms = 500                   # 再生開始時の無音prime(ms)。デバイス起動の先頭欠け対策。
+                                 # HDMI/Bluetooth等は起動が遅く要大きめ。低遅延デバイスは下げ可(例120)。0で無効。
 
 [mic]
 device      = "default"
