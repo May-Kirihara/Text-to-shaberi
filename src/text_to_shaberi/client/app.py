@@ -276,6 +276,9 @@ def run_gui(config_path: str | Path) -> None:
                     pass
                 mic_holder[0] = None
             mic_reconfiguring[0] = False
+            # マイクON中に設定変更したら、新しい VAD/マイク設定で即再開（トグルし直し不要）
+            if mic_enabled_by_user[0]:
+                on_mic_toggle(True)
 
             window.set_output_device(cfg.output.device)
 
