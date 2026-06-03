@@ -37,6 +37,7 @@ src/text_to_shaberi/
   - `common`: numpy, pydantic, tomllib(標準)
 - **Windowsクライアントは client+common のみインストール**（torch/qwen 不要）。サーバは server+common。
 - 設定: `server.toml` / `client.toml` に分割（共通ローダ）。TTSプロファイルはサーバ側 `profiles/tts/*.toml`。
+- **クライアントUI方針**: メイン画面は**シンプル維持**（入力・送信・停止・出力先・ログ）。増えていく設定は**歯車(設定)ボタン → 設定ダイアログ**に集約する（ハンバーガーでも可）。設定ダイアログの項目: **サーバWSアドレス / 認証トークン / 接続(LAN・遠隔) / コーデック(自動/PCM/Opus) / 出力デバイス / TTSプロファイル選択 / 将来項目**。設定は `client.toml` に永続化し、起動時ロード・変更時保存。機能トグル（例: 自動TTS, マイクON/OFF）も同ダイアログに。
 
 ## 4. WebSocket プロトコル（v1）
 - 接続: `ws(s)://host:port/ws`。認証は接続時 `Authorization: Bearer <token>`（または最初の `hello` に同梱）。
@@ -90,7 +91,7 @@ src/text_to_shaberi/
 ## 9. 改訂マイルストーン
 - **R0 再編**: common/server/client へ分割、依存グループ、`common/protocol.py`(pydantic)、既存コード移設、両エントリの空起動。
 - **S1 サーバTTS-WS**: `speak`→GPT-SoVITS streaming→PCM音声フレーム送信＋`stop`キャンセル。
-- **C1 クライアント再生**: GUI→WS `speak`→受信→**StreamingPlayer(lazy-start修正)** 再生。LAN/PCMで「テキスト→声」疎通＋TTFA計測。
+- **C1 クライアント再生**: GUI→WS `speak`→受信→**StreamingPlayer(lazy-start修正)** 再生。LAN/PCMで「テキスト→声」疎通＋TTFA計測。＋**歯車ボタンの設定ダイアログ最小版**（サーバWSアドレス/トークンを設定→`client.toml`保存、再接続）。
 - **S2 サーバSTT-WS**: 音声受信→Qwen→`transcript`（＋自動TTSオプション）。
 - **C2 マイク+VAD**: 端末マイク常時録音・Silero VAD・発話セグメント→WS→transcript/音声往復（マイク往復完成）。
 - **X1 コーデック/セキュリティ**: PCM/Opus自動＋token認証＋wss/TLS（遠隔対応）。
@@ -110,6 +111,7 @@ src/text_to_shaberi/
 - [ ] マイク発話→サーバSTT→transcript表示→（自動TTSなら）再生。
 - [ ] `stop` で音停止＋サーバ生成キャンセル。
 - [ ] LAN/PCM と Opus 双方で疎通。token認証（遠隔は wss）。
+- [ ] **設定ダイアログ(歯車)** からサーバWSアドレス/トークン等を変更・`client.toml`保存でき、再接続に反映。
 - [ ] サーバ/クライアント各失敗（接続断・サーバ不達・OOM）でクラッシュせず復帰。
 
 ## 12. PLAN.md との関係
