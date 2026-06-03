@@ -1,0 +1,44 @@
+# Text-to-shaberi アプリ設定
+# 詳細は docs/PLAN.md §7.3
+
+[app]
+active_tts_profile = "gpt-sovits"   # profiles/tts/<name>.toml
+
+[stt]
+backend  = "qwen_local"             # qwen_local | qwen_dashscope
+language = "ja"                     # ⇔ Qwen "Japanese"（マッピングは stt 層で固定）
+[stt.qwen_local]
+model               = "Qwen/Qwen3-ASR-1.7B"
+device              = "cuda:0"
+dtype               = "bfloat16"
+attn_implementation = "sdpa"        # flash-attn導入済みなら "flash_attention_2"
+
+[mic]
+device      = "default"
+sample_rate = 16000
+channels    = 1
+[mic.preprocess]
+gate    = true                      # 軽量ノイズゲート（MVP既定ON）
+denoise = "off"                     # off | rnnoise | noisereduce（任意・遅延計測対象）
+[mic.vad]
+engine         = "silero"           # silero | webrtc
+min_silence_ms = 500                # 発話終端の無音判定
+speech_pad_ms  = 150
+
+[output]
+device   = "default"                # "default" | デバイス名の一部 | index（仮想オーディオ "TTS_Virtual" 等）
+resample = "auto"                   # 出力デバイスrateへ soxr 変換
+
+[api]
+enabled    = true
+host       = "127.0.0.1"
+port       = 8765
+auth_token = ""                     # 空=ローカルのみ。外部公開時は必須
+
+[ui]
+# 日本語入力の方式（X11+PySide6ではシステムfcitx5プラグインが版差で使えないため）
+#   ibus           = アプリだけ ibus+mozc を使い実キーボードで日本語入力（既定）
+#   virtualkeyboard = PySide6同梱の画面キーボード
+#   system          = 環境変数を継承（通常は英数のみ）
+input_method = "ibus"
+

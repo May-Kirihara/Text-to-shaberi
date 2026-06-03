@@ -175,6 +175,10 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# 参照音声などのバイナリ音声サンプル（声の素材を履歴に入れない）
+assets/**/*.wav
+assets/*.wav
+
 # pytype static type analyzer
 .pytype/
 

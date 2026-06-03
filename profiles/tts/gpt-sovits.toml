@@ -1,0 +1,36 @@
+# GPT-SoVITS (api_v2) 用 TTSプロファイル
+# 実測(2026-06-03): streaming_mode=3 で first-chunk 270ms / 出力 pcm_s16le 32000Hz mono
+# スキーマ詳細は docs/PLAN.md §7
+
+[meta]
+name   = "GPT-SoVITS (ローカル, api_v2)"
+driver = "generic_http"
+
+[request]
+method      = "POST"
+url         = "http://127.0.0.1:9880/tts"
+body_type   = "json"               # json | form | multipart | raw_template
+timeout_sec = 30
+[request.headers]
+"Content-Type" = "application/json"
+
+# body はテンプレ。{{ text }} が共通テキストへ置換される（単一プレースホルダは型を保持）
+[request.body]
+text           = "{{ text }}"
+text_lang      = "ja"
+ref_audio_path = "/mnt/holyland/Project/Text-to-shaberi/assets/ref.wav"
+prompt_text    = "ある条件を満たすと、追ってくるモンスターを逆襲して食べることができる。"
+prompt_lang    = "ja"
+streaming_mode = 3                 # 0..3 (3=低遅延・実測270ms / 2=中品質439ms)
+media_type     = "raw"             # raw=PCMチャンク再生で最小遅延
+top_k          = 15
+speed_factor   = 1.0
+
+[response]
+mode         = "audio_stream"      # audio_stream | audio_file | json_base64 | json_url
+content_type = "audio/raw"
+
+[audio]                            # raw/PCM のとき必須（再生フォーマット）
+encoding    = "pcm_s16le"
+sample_rate = 32000
+channels    = 1

@@ -1,0 +1,32 @@
+[project]
+name = "text-to-shaberi"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "May_Kirihara", email = "may.kirihara.the.snow+Cre@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.136.3",
+    "httpx>=0.28.1",
+    "numpy>=2.4.4",
+    "pyside6>=6.11.1",
+    "qasync>=0.28.0",
+    "qwen-asr>=0.0.6",
+    "silero-vad>=6.2.1",
+    "sounddevice>=0.5.5",
+    "soxr>=1.1.0",
+    "torch>=2.11.0",
+    "uvicorn>=0.48.0",
+]
+
+[project.scripts]
+text-to-shaberi = "text_to_shaberi:main"
+
+[[tool.uv.index]]
+url = "https://download.pytorch.org/whl/cu128"
+
+[build-system]
+requires = ["uv_build>=0.9.16,<0.10.0"]
+build-backend = "uv_build"
