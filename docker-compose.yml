@@ -1,0 +1,92 @@
+# Text-to-shaberi サーバスタック（orchestrator + GPT-SoVITS）
+# 設計: docs/IMPL-DOCKER.md（§9 が確定仕様 / codex レビュー反映済み）
+#
+# クライアント(PySide6 GUI)は Docker 化しない。ネイティブから ws://<host>:8765/ws へ接続。
+#
+# 使い方:
+#   cp deploy/server.docker.toml.example deploy/server.docker.toml  # token を設定
+#   cp deploy/.env.example .env                                     # パス/GPU を環境に合わせる
+#   docker compose build && docker compose up -d
+name: text-to-shaberi
+
+services:
+  # ── TTS: GPT-SoVITS api_v2（プレビルドイメージ流用 + 重み入りローカルrepoを bind-mount）──
+  gpt-sovits:
+    image: xxxxrt666/gpt-sovits:latest-cu128
+    container_name: shaberi-gpt-sovits
+    working_dir: /workspace/GPT-SoVITS
+    # upstream Dockerfile CMD（rm pretrained_models → /workspace/models へ symlink）は
+    # bind-mount に対して実行するとホストの重みを破壊する。使わない。
+    # conda は /root/conda 配置。login shell は ~/.bashrc を直接 source しないため、
+    # profile.d を明示 source して base を activate してから api_v2 を起動する。
+    command:
+      - bash
+      - -lc
+      - >
+        source /root/conda/etc/profile.d/conda.sh && conda activate base &&
+        exec python api_v2.py -a 0.0.0.0 -p 9880 -c GPT_SoVITS/configs/tts_infer.yaml
+    environment:
+      - is_half=true
+      - PYTHONPATH=/workspace/GPT-SoVITS
+    volumes:
+      # 重み一式（GPT_SoVITS/pretrained_models, text/G2PWModel）を含むローカルrepoをそのまま供給
+      - ${GPTSOVITS_DIR:-/mnt/holyland/Project/GPT-SoVITS}:/workspace/GPT-SoVITS
+      # ref.wav は GPT-SoVITS が「自分のFS」から開く → assets を read-only でマウント
+      - ${SHABERI_ASSETS:-./assets}:/refs:ro
+    shm_size: "16g"
+    networks: [shaberi-net]
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_ID:-0}"]
+              capabilities: [gpu]
+    healthcheck:
+      # api_v2 は TTS 初期化後に listen するため TCP 到達 ≒ ロード完了。
+      # 初回ロードに時間がかかるので retries を多めに。conda の python を絶対パスで叩く。
+      test:
+        - CMD-SHELL
+        - /root/conda/bin/python -c "import socket,sys; s=socket.socket(); s.settimeout(2); sys.exit(0 if s.connect_ex(('127.0.0.1',9880))==0 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 60          # 最大 ~10分待つ
+      start_period: 30s
+
+  # ── STT + WS オーケストレータ（このリポジトリ）──
+  orchestrator:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.server
+    image: text-to-shaberi-server:local
+    container_name: shaberi-orchestrator
+    command: ["text-to-shaberi-server", "-c", "/app/deploy/server.docker.toml"]
+    environment:
+      - HF_HOME=/hf
+      # 同時 speak+STT のVRAMピークが厳しい場合に有効化:
+      # - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    volumes:
+      - ./deploy/server.docker.toml:/app/deploy/server.docker.toml:ro  # secret入り（gitignore）
+      - ./profiles:/app/profiles:ro                                    # profile を再ビルドなしで編集可
+      - hf-cache:/hf                                                   # Qwen 重みを永続化（再DL回避）
+    ports:
+      - "${WS_PORT:-8765}:8765"
+    networks: [shaberi-net]
+    depends_on:
+      gpt-sovits:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_ID:-0}"]
+              capabilities: [gpu]
+
+networks:
+  shaberi-net:
+
+volumes:
+  hf-cache:

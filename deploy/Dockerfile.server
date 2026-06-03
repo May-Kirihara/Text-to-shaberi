@@ -1,0 +1,35 @@
+# orchestrator（STT=Qwen3-ASR in-proc + WS）イメージ
+# 設計: docs/IMPL-DOCKER.md §3.2 / §9
+#
+# torch は pyproject の [[tool.uv.index]] cu128 から取得（wheel が CUDA runtime を内包）。
+# GPU はビルド時には不要。compose 側の device 予約でドライバ/デバイスが注入される。
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+# opuslib は libopus 実体を要求する（無いと opus 不可 → pcm へ自動フォールバック）。
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libopus0 \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+ENV UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1 \
+    HF_HOME=/hf
+
+# 依存解決を層キャッシュに乗せる。uv_build バックエンドはプロジェクト自身のビルドに
+# pyproject + src + README（pyproject の readme 参照）を要求するため先にコピーする。
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+RUN uv sync --extra server --no-dev --frozen
+
+# 実行時アセット
+COPY profiles ./profiles
+COPY deploy ./deploy
+
+# .venv の実行ファイル（text-to-shaberi-server）を PATH に
+ENV PATH="/app/.venv/bin:${PATH}"
+
+EXPOSE 8765
+
+# compose 側で -c のパスを上書きする想定。単体起動時の既定も同じ。
+CMD ["text-to-shaberi-server", "-c", "/app/deploy/server.docker.toml"]

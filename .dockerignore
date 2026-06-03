@@ -1,0 +1,28 @@
+# orchestrator イメージのビルドコンテキスト削減
+.git
+.github
+**/__pycache__
+*.py[codz]
+.venv
+env/
+venv/
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.claude
+
+# ドキュメント・テストはイメージに不要
+docs
+tests
+
+# Markdown は基本除外するが、pyproject の readme = "README.md" がビルドに必須なので残す
+*.md
+!README.md
+
+# secret 入り実体（compose が実行時にマウントする）
+deploy/server.docker.toml
+.env
+
+# クライアント関連はサーバイメージに不要
+client.toml
+assets

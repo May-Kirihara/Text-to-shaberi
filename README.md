@@ -89,6 +89,36 @@ cd text-to-shaberi
    ```
    - 起動ログに `[opus] available: True` と `Uvicorn running on http://127.0.0.1:8765` が出れば OK。
 
+### A-2. サーバ（Docker compose — GPT-SoVITS 同梱）
+
+A のネイティブ手順の代わりに、**サーバ側一式（orchestrator + GPT-SoVITS api_v2）を `docker compose` で立ち上げる**こともできます（クライアントは対象外＝ネイティブのまま）。設計詳細は [`docs/IMPL-DOCKER.md`](docs/IMPL-DOCKER.md)。
+
+前提: Linux + NVIDIA GPU、`docker` / `docker compose`（v2+）/ **nvidia-container-toolkit**（`deploy.resources.reservations.devices` で GPU を割り当て）。GPT-SoVITS は重み入りリポジトリをそのまま bind-mount するため、ローカルに `GPT-SoVITS`（`GPT_SoVITS/pretrained_models/*` と `text/G2PWModel` を含む）が必要。
+
+> ⚠️ **compose は native 版の「置き換え」**。同じ `8765`/`9880` とGPUを使うため、**native の orchestrator / GPT-SoVITS を起動したまま `up` するとポート衝突します**。先に native を停止してください。
+
+```bash
+# 1. 設定を作る
+cp deploy/server.docker.toml.example deploy/server.docker.toml   # token を設定（例: openssl rand -hex 24）
+cp deploy/.env.example .env                                      # GPTSOVITS_DIR / SHABERI_ASSETS / GPU_ID / WS_PORT を環境に合わせる
+
+# 2. ビルド & 起動（初回は torch cu128 取得でイメージ ~25GB / Qwen 自動DL / SoVITS ロードで数分）
+docker compose build
+docker compose up -d
+
+# 3. ロード完了をログで確認
+docker compose logs -f gpt-sovits      # api_v2 が :9880 で listen
+docker compose logs -f orchestrator    # [opus] available: True / Uvicorn running
+
+# 4. クライアント（Windows）の client.toml:
+#    [server].address = ws://<linux-host-ip>:8765/ws, token = <同じ値>
+```
+
+- `docker-compose.yml`（repo直下）= `gpt-sovits` + `orchestrator` の2サービス。`.env` でパス/GPU/ポートを上書き。
+- `server.docker.toml` は **token 入りのため gitignore**。compose が read-only でマウント（`profiles/` も同様にマウントし、再ビルドなしで編集可）。
+- Qwen 重みは名前付きボリューム `hf-cache` に永続化（再起動で再DLしない）。
+- GPU を複数枚から選ぶ場合は `.env` の `GPU_ID`。24GB 1枚に Qwen + GPT-SoVITS は同居可能。
+
 ### B. クライアント（Windows / Linux）
 
 1. **クライアント依存をインストール**（torch/qwen を含まない軽量セット）:

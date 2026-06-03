@@ -1,0 +1,29 @@
+# Text-to-shaberi サーバ設定（docker compose 用ひな形）
+# このファイルを deploy/server.docker.toml にコピーし、token を設定して使う。
+#   cp deploy/server.docker.toml.example deploy/server.docker.toml
+#   # token をランダム値に: 例) openssl rand -hex 24
+# 実体 (deploy/server.docker.toml) は .gitignore 済み。compose が read-only マウントする。
+
+[bind]
+host  = "0.0.0.0"          # コンテナ外（Windows クライアント）から接続するため
+port  = 8765
+token = "CHANGE_ME"        # 非loopback bind は token 必須（空だと起動拒否される）
+tls_cert = ""              # TLS する場合は両方指定（前段 reverse proxy 推奨）
+tls_key  = ""
+
+[stt]
+backend  = "qwen_local"
+language = "ja"
+[stt.qwen_local]
+model               = "Qwen/Qwen3-ASR-1.7B"
+device              = "cuda:0"
+dtype               = "bfloat16"
+attn_implementation = "sdpa"     # flash-attn 導入済みなら "flash_attention_2"
+
+[tts]
+profiles_dir   = "/app/profiles"     # parents[3] 解決に依存せず明示（コンテナ内パス）
+active_profile = "gpt-sovits-docker" # profiles/tts/gpt-sovits-docker.toml（サービス名URL）
+
+[transport]
+codec = "opus"                   # opus | pcm。libopus0 が無いと自動 pcm フォールバック
+opus_bitrate = 24000             # bps

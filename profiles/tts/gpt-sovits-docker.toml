@@ -1,0 +1,37 @@
+# GPT-SoVITS (api_v2) 用 TTSプロファイル — docker compose 版
+# profiles/tts/gpt-sovits.toml との差分は2点のみ:
+#   - request.url        : 127.0.0.1 → compose サービス名 gpt-sovits
+#   - request.body.ref_audio_path : GPT-SoVITS コンテナ内のマウント先 /refs/ref.wav
+# （ref_audio_path は orchestrator ではなく GPT-SoVITS 側のFSで開かれる）
+
+[meta]
+name   = "GPT-SoVITS (docker, api_v2)"
+driver = "generic_http"
+
+[request]
+method      = "POST"
+url         = "http://gpt-sovits:9880/tts"   # ← compose ネットワークのサービス名解決
+body_type   = "json"
+timeout_sec = 30
+[request.headers]
+"Content-Type" = "application/json"
+
+[request.body]
+text           = "{{ text }}"
+text_lang      = "ja"
+ref_audio_path = "/refs/ref.wav"             # ← assets を gpt-sovits へ :ro マウントした先
+prompt_text    = "ある条件を満たすと、追ってくるモンスターを逆襲して食べることができる。"
+prompt_lang    = "ja"
+streaming_mode = 3                 # 0..3 (3=低遅延・実測270ms / 2=中品質439ms)
+media_type     = "raw"             # raw=PCMチャンク再生で最小遅延
+top_k          = 15
+speed_factor   = 1.0
+
+[response]
+mode         = "audio_stream"      # audio_stream | audio_file | json_base64 | json_url
+content_type = "audio/raw"
+
+[audio]                            # raw/PCM のとき必須（再生フォーマット）
+encoding    = "pcm_s16le"
+sample_rate = 32000
+channels    = 1
