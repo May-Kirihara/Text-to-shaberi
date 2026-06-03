@@ -1,15 +1,16 @@
-"""WebSocket クライアント（C1 本実装 + C2 STT/auto_tts 拡張 + X1 Opus/Security）。
+"""WebSocket クライアント（C1 本実装 + C2 STT/auto_tts 拡張 + X1 Opus/Security + X2a 自動再接続）。
 
 hello→ready、speak→audio_begin+binary×N+audio_end、cancel→stopped を処理。
 C2: utter(pcm)→stt_begin+binary×N+stt_end→transcript→auto_tts audio 連鎖。
 X1: opus caps, Bearer token, wss/TLS ssl, opus decode, sink PCM separation.
-受信(asyncio)→再生(別スレッド) を PlaybackSink で橋渡し。
+X2a: asyncio.Lock 直列化・自動再接続(指数バックオフ+jitter)・is_connected・close/reconnect 分離.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import random
 import ssl
 import uuid
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -61,6 +62,9 @@ class WSClient:
         tls_insecure: bool = False,
         tls_cafile: str = "",
         token_in_query: bool = False,
+        auto_reconnect: bool = True,
+        reconnect_base: float = 0.5,
+        reconnect_max_delay: float = 30.0,
     ) -> None:
         self._address = address
         self._token = token
@@ -77,6 +81,9 @@ class WSClient:
         self._tls_insecure = tls_insecure
         self._tls_cafile = tls_cafile
         self._token_in_query = token_in_query
+        self._auto_reconnect = auto_reconnect
+        self._reconnect_base = reconnect_base
+        self._reconnect_max = reconnect_max_delay
 
         self._ws: Any = None
         self._recv_task: asyncio.Task | None = None
@@ -93,6 +100,16 @@ class WSClient:
         self._auto_tts_warned = False
         self._playback_codec: str | None = None
         self._opus_decoder: OpusStreamDecoder | None = None
+
+        self._conn_lock = asyncio.Lock()
+        self._user_closing: bool = False
+        self._reconnect_task: asyncio.Task | None = None
+        self._reconnect_attempt: int = 0
+
+    def _get_loop(self) -> asyncio.AbstractEventLoop:
+        if self._loop is not None:
+            return self._loop
+        return asyncio.get_event_loop()
 
     def _log(self, msg: str) -> None:
         if self._on_log:
@@ -132,53 +149,125 @@ class WSClient:
         new_query = urlencode(query_params)
         return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
 
-    async def connect(self) -> bool:
-        try:
-            url = self._build_url()
-            connect_kwargs: dict[str, Any] = {}
-            if self._token:
-                connect_kwargs["additional_headers"] = {
-                    "Authorization": f"Bearer {self._token}"
-                }
-            ssl_ctx = self._build_ssl_context()
-            if ssl_ctx is not None:
-                connect_kwargs["ssl"] = ssl_ctx
-            self._ws = await websockets.connect(url, **connect_kwargs)
-            await self._send(Hello(
-                client_name="text-to-shaberi",
-                client_id="",
-                caps={"codecs": self._client_codecs()},
-            ))
-            raw = await asyncio.wait_for(self._ws.recv(), timeout=10.0)
-            msg = parse_message(json.loads(raw))
-            if not isinstance(msg, Ready):
-                self._log(f"期待外のメッセージ: {msg}")
+    def is_connected(self) -> bool:
+        return (
+            self._ws is not None
+            and not getattr(self._ws, "close_code", None)
+            and self._recv_task is not None
+            and not self._recv_task.done()
+            and self._ready is not None
+        )
+
+    async def _safe_close_ws(self) -> None:
+        if self._ws is not None:
+            try:
                 await self._ws.close()
-                self._ws = None
+            except Exception:
+                pass
+            self._ws = None
+
+    def _cancel_reconnect_task(self) -> None:
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+        self._reconnect_task = None
+        self._reconnect_attempt = 0
+
+    async def connect(self) -> bool:
+        async with self._conn_lock:
+            if self.is_connected():
+                return True
+            try:
+                url = self._build_url()
+                connect_kwargs: dict[str, Any] = {}
+                if self._token:
+                    connect_kwargs["additional_headers"] = {
+                        "Authorization": f"Bearer {self._token}"
+                    }
+                ssl_ctx = self._build_ssl_context()
+                if ssl_ctx is not None:
+                    connect_kwargs["ssl"] = ssl_ctx
+                self._ws = await websockets.connect(url, **connect_kwargs)
+                await self._send(Hello(
+                    client_name="text-to-shaberi",
+                    client_id="",
+                    caps={"codecs": self._client_codecs()},
+                ))
+                raw = await asyncio.wait_for(self._ws.recv(), timeout=10.0)
+                msg = parse_message(json.loads(raw))
+                if not isinstance(msg, Ready):
+                    self._log(f"期待外のメッセージ: {msg}")
+                    await self._safe_close_ws()
+                    return False
+                self._ready = msg
+                self._profiles = msg.profiles
+                self._state("ready", msg)
+                self._state("connected")
+                self._recv_task = self._get_loop().create_task(self._recv_loop())
+                return True
+            except Exception as exc:
+                self._log(f"接続失敗: {exc}")
+                await self._safe_close_ws()
+                self._state("error", str(exc))
                 return False
-            self._ready = msg
-            self._profiles = msg.profiles
-            self._state("ready", msg)
-            self._state("connected")
-            self._recv_task = asyncio.ensure_future(self._recv_loop())
-            return True
-        except Exception as exc:
-            self._log(f"接続失敗: {exc}")
-            self._state("error", str(exc))
-            return False
+
+    async def _teardown_ws(self) -> None:
+        if self._recv_task is not None:
+            self._recv_task.cancel()
+            try:
+                await self._recv_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._recv_task = None
+        if self._sink is not None:
+            self._sink.abort()
+            await asyncio.to_thread(self._sink.join)
+            self._sink = None
+        await self._safe_close_ws()
+        self._ready = None
+
+    async def close(self) -> None:
+        self._user_closing = True
+        self._cancel_reconnect_task()
+        async with self._conn_lock:
+            await self._teardown_ws()
 
     async def reconnect(self, address: str | None = None, token: str | None = None) -> bool:
-        await self.close()
+        self._cancel_reconnect_task()
         if address is not None:
             self._address = address
         if token is not None:
             self._token = token
+        async with self._conn_lock:
+            await self._teardown_ws()
         return await self.connect()
+
+    def _schedule_reconnect(self) -> None:
+        if self._user_closing or not self._auto_reconnect:
+            return
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            return
+        self._reconnect_task = self._get_loop().create_task(self._reconnect_loop())
+
+    async def _reconnect_loop(self) -> None:
+        while not self._user_closing:
+            delay = min(self._reconnect_base * (2 ** self._reconnect_attempt), self._reconnect_max)
+            delay += random.uniform(0, self._reconnect_base)
+            self._reconnect_attempt += 1
+            self._state("reconnecting", self._reconnect_attempt)
+            await asyncio.sleep(delay)
+            if self._user_closing:
+                return
+            ok = await self.connect()
+            if ok:
+                self._reconnect_attempt = 0
+                self._reconnect_task = None
+                return
+        self._reconnect_task = None
 
     async def speak(self, text: str, profile: str | None = None) -> None:
         loop = self._loop or asyncio.get_event_loop()
 
-        if self._ws is None:
+        if not self.is_connected():
             ok = await self.connect()
             if not ok:
                 self._log("接続できません")
@@ -204,11 +293,13 @@ class WSClient:
         except Exception as exc:
             self._finish_stream()
             self._state("error", str(exc))
+            if not self.is_connected():
+                self._schedule_reconnect()
 
     async def utter(self, pcm: bytes, auto_tts: bool = True, chunk_bytes: int = 32768) -> None:
         loop = self._loop or asyncio.get_event_loop()
 
-        if self._ws is None:
+        if not self.is_connected():
             ok = await self.connect()
             if not ok:
                 self._log("接続できません")
@@ -249,6 +340,8 @@ class WSClient:
         except Exception as exc:
             self._finish_stream()
             self._state("error", str(exc))
+            if not self.is_connected():
+                self._schedule_reconnect()
             return
 
     async def cancel(self) -> None:
@@ -265,25 +358,6 @@ class WSClient:
 
     def is_busy(self) -> bool:
         return self._active_id is not None
-
-    async def close(self) -> None:
-        if self._recv_task is not None:
-            self._recv_task.cancel()
-            try:
-                await self._recv_task
-            except (asyncio.CancelledError, Exception):
-                pass
-            self._recv_task = None
-        if self._sink is not None:
-            self._sink.abort()
-            await asyncio.to_thread(self._sink.join)
-            self._sink = None
-        if self._ws is not None:
-            try:
-                await self._ws.close()
-            except Exception:
-                pass
-            self._ws = None
 
     async def _send(self, model: Any) -> None:
         async with self._send_lock:
@@ -302,6 +376,10 @@ class WSClient:
         return resolve_device(raw)
 
     async def _recv_loop(self) -> None:
+        # cancelled=True は「自分(teardown/close/reconnect)が cancel した」ことを示す。
+        # サーバ正常切断(async for 正常終了)/ConnectionClosed/例外 は cancelled=False＝
+        # 予期せぬ切断なので自動再接続する。手動 reconnect の幻 reconnecting を防ぐ。
+        cancelled = False
         try:
             async for raw in self._ws:
                 if isinstance(raw, bytes):
@@ -313,22 +391,22 @@ class WSClient:
                         self._log(f"パース失敗: {exc}")
                         continue
                     self._on_message(m)
+        except asyncio.CancelledError:
+            cancelled = True
         except websockets.ConnectionClosed:
             self._log("接続切断")
-            self._state("disconnected")
-            if self._active_id is not None:
-                if self._sink is not None:
-                    self._sink.abort()
-                self._finish_stream()
-        except asyncio.CancelledError:
-            pass
         except Exception as exc:
             self._log(f"受信エラー: {exc}")
-            self._state("disconnected")
+        finally:
+            if self._recv_task is asyncio.current_task():
+                self._recv_task = None
             if self._active_id is not None:
                 if self._sink is not None:
                     self._sink.abort()
                 self._finish_stream()
+            self._state("disconnected")
+            if not cancelled and not self._user_closing and self._auto_reconnect:
+                self._get_loop().call_soon(self._schedule_reconnect)
 
     def _on_binary(self, raw: bytes) -> None:
         if not self._active_id or not self._playback_id or self._sink is None or self._cancelling:
@@ -360,8 +438,7 @@ class WSClient:
                 except Exception:
                     pass
 
-            if self._loop is not None:
-                asyncio.ensure_future(_cancel_after_overload(), loop=self._loop)
+            self._get_loop().create_task(_cancel_after_overload())
             return
 
         if not self._first_chunk_logged:

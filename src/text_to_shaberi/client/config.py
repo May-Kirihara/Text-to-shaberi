@@ -15,6 +15,8 @@ class ServerConfig:
     tls_insecure: bool = False
     tls_cafile: str = ""
     token_in_query: bool = False
+    reconnect: bool = True
+    reconnect_max_delay: float = 30.0
 
 
 @dataclass(slots=True)

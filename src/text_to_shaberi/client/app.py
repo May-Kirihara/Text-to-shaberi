@@ -138,6 +138,8 @@ def run_gui(config_path: str | Path) -> None:
         tls_insecure=cfg.server.tls_insecure,
         tls_cafile=cfg.server.tls_cafile,
         token_in_query=cfg.server.token_in_query,
+        auto_reconnect=cfg.server.reconnect,
+        reconnect_max_delay=cfg.server.reconnect_max_delay,
     )
 
     mic_holder: list = [None]
@@ -164,6 +166,8 @@ def run_gui(config_path: str | Path) -> None:
             window.set_busy(False)
         elif event == "error":
             window.log(f"[error] {payload}")
+        elif event == "reconnecting":
+            window.set_connection(f"\u518d\u63a5\u7d9a\u4e2d\u2026({payload})")
 
     ws._on_state = _on_state
 

@@ -115,6 +115,7 @@ class TestWSClient:
                     on_state=lambda e, p=None: None,
                     sink_factory=sink_factory,
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                 )
                 ok = await ws.connect()
                 assert ok is True
@@ -159,6 +160,7 @@ class TestWSClient:
                     on_state=lambda e, p=None: None,
                     sink_factory=sink_factory,
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                 )
                 await ws.connect()
                 await ws.speak("テスト")
@@ -193,6 +195,7 @@ class TestWSClient:
                     on_state=lambda e, p=None: None,
                     sink_factory=sink_factory,
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                 )
                 await ws.connect()
                 await ws.speak("テスト")
@@ -250,6 +253,7 @@ class TestWSClient:
                     on_state=lambda e, p=None: None,
                     sink_factory=sink_factory,
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                 )
                 await ws.connect()
                 await ws.speak("テスト")
@@ -287,6 +291,7 @@ class TestWSClient:
                     f"ws://127.0.0.1:{port}/ws",
                     token="secret&token#test",
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                     token_in_query=True,
                 )
                 ok = await ws.connect()
@@ -318,6 +323,7 @@ class TestWSClient:
                 ws = WSClient(
                     f"ws://127.0.0.1:{port}/ws",
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                     default_profile="gpt-sovits",
                 )
                 await ws.connect()
@@ -358,6 +364,7 @@ class TestWSClient:
                     on_state=lambda e, p=None: states.append((e, p)),
                     sink_factory=sink_factory,
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                 )
                 await ws.connect()
 
@@ -419,6 +426,7 @@ class TestWSClientSTT:
                     on_state=lambda e, p=None: states.append((e, p)),
                     sink_factory=sink_factory,
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                 )
                 await ws.connect()
                 pcm = b"\x00\x01" * 1000
@@ -474,6 +482,7 @@ class TestWSClientSTT:
                     on_state=lambda e, p=None: states.append((e, p)),
                     sink_factory=sink_factory,
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                 )
                 await ws.connect()
                 await ws.utter(b"\x00" * 1000, auto_tts=True)
@@ -521,6 +530,7 @@ class TestWSClientSTT:
                     on_state=lambda e, p=None: states.append((e, p)),
                     sink_factory=sink_factory,
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                 )
                 await ws.connect()
                 await ws.utter(b"\x00" * 1000, auto_tts=True)
@@ -561,6 +571,7 @@ class TestWSClientSTT:
                     on_state=lambda e, p=None: states.append((e, p)),
                     sink_factory=sink_factory,
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                 )
                 await ws.connect()
                 await ws.utter(b"\x00" * 1000, auto_tts=True)
@@ -612,6 +623,7 @@ class TestWSClientSTT:
                     on_state=lambda e, p=None: states.append((e, p)),
                     sink_factory=FakeSinkFactory(),
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                 )
                 await ws.connect()
 
@@ -655,6 +667,7 @@ class TestWSClientSTT:
                     on_state=lambda e, p=None: None,
                     sink_factory=FakeSinkFactory(),
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                     stt_format=AudioFormatPayload(codec="pcm_s16le", sample_rate=16000, channels=2),
                 )
                 await ws.connect()
@@ -693,6 +706,7 @@ class TestWSClientSTT:
                     on_state=lambda e, p=None: None,
                     sink_factory=FakeSinkFactory(),
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                 )
                 await ws.connect()
                 await ws.utter(b"\x00" * 1000, auto_tts=True)
@@ -743,6 +757,7 @@ class TestWSClientSTT:
                     on_state=lambda e, p=None: states.append((e, p)),
                     sink_factory=sink_factory,
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                 )
                 await ws.connect()
                 await ws.utter(b"\x00" * 1000, auto_tts=True)
@@ -780,6 +795,7 @@ class TestWSClientSTT:
                     on_state=lambda e, p=None: states.append((e, p)),
                     sink_factory=FakeSinkFactory(),
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                 )
                 await ws.connect()
 
@@ -830,6 +846,7 @@ class TestWSClientSTT:
                     on_state=lambda e, p=None: states.append((e, p)),
                     sink_factory=FakeSinkFactory(),
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                 )
                 await ws.connect()
 
@@ -899,6 +916,7 @@ class TestWSClientOpus:
                     on_state=lambda e, p=None: None,
                     sink_factory=sink_factory,
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                     codec_pref="opus",
                 )
                 ok = await ws.connect()
@@ -959,6 +977,7 @@ class TestWSClientOpus:
                     on_state=lambda e, p=None: states.append((e, p)),
                     sink_factory=sink_factory,
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                     codec_pref="opus",
                 )
                 ok = await ws.connect()
@@ -1009,6 +1028,7 @@ class TestWSClientOpus:
                     on_state=lambda e, p=None: None,
                     sink_factory=sink_factory,
                     loop=asyncio.get_event_loop(),
+                    auto_reconnect=False,
                     codec_pref="pcm",
                 )
                 ok = await ws.connect()
