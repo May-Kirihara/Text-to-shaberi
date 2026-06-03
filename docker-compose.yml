@@ -65,12 +65,15 @@ services:
       dockerfile: deploy/Dockerfile.server
     image: text-to-shaberi-server:local
     container_name: shaberi-orchestrator
+    # 非ログインシェル(-c)。-lc(ログイン)だと /etc/profile が PATH を上書きして
+    # イメージ ENV の /app/.venv/bin が落ち text-to-shaberi-server が not found になる。
+    # 念のため絶対パスでも叩く。
     command:
       - bash
-      - -lc
+      - -c
       - >
         test -f /app/deploy/server.docker.toml || { echo "FATAL: /app/deploy/server.docker.toml がありません。ホスト側で 'cp deploy/server.docker.toml.example deploy/server.docker.toml' を実行し token を設定してください。"; exit 1; };
-        exec text-to-shaberi-server -c /app/deploy/server.docker.toml
+        exec /app/.venv/bin/text-to-shaberi-server -c /app/deploy/server.docker.toml
     environment:
       - HF_HOME=/hf
       # 同時 speak+STT のVRAMピークが厳しい場合に有効化:
