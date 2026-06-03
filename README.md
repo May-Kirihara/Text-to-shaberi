@@ -119,6 +119,11 @@ docker compose logs -f orchestrator    # [opus] available: True / Uvicorn runnin
 - Qwen 重みは名前付きボリューム `hf-cache` に永続化（再起動で再DLしない）。
 - GPU を複数枚から選ぶ場合は `.env` の `GPU_ID`。24GB 1枚に Qwen + GPT-SoVITS は同居可能。
 
+> **重要 — `GPTSOVITS_DIR` はマシン毎に必須設定**。プレビルドイメージは GPT-SoVITS の*コードのみ*を持ち、**重みは持ちません**。重みは `.env` の `GPTSOVITS_DIR`（`api_v2.py` と `GPT_SoVITS/pretrained_models`・`text/G2PWModel` を含む実在ローカルrepo）を bind-mount して供給します。
+> - 存在しないパスを指すと Docker が空ディレクトリをマウントしてイメージ内 `api_v2.py` が隠れ、`gpt-sovits` が `python: can't open file '/workspace/GPT-SoVITS/api_v2.py'` で再起動ループ → orchestrator も `dependency failed to start`。
+> - 起動前チェック: `ls "$GPTSOVITS_DIR/api_v2.py"` と `ls "$SHABERI_ASSETS/ref.wav"`（`ref.wav` は gitignore 済みなので新規 clone には無い）。
+> - compose 側にも fail-fast を入れてあり、未配置時は `gpt-sovits` ログに `FATAL: ... api_v2.py がありません ...` を表示します。
+
 ### B. クライアント（Windows / Linux）
 
 1. **クライアント依存をインストール**（torch/qwen を含まない軽量セット）:

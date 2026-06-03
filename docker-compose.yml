@@ -23,6 +23,8 @@ services:
       - bash
       - -lc
       - >
+        test -f /workspace/GPT-SoVITS/api_v2.py || { echo "FATAL: /workspace/GPT-SoVITS に api_v2.py がありません。.env の GPTSOVITS_DIR がこのホスト上の GPT-SoVITS リポジトリ(重み込み)を指しているか確認してください(マウント元が空/誤りだとイメージのコードが隠れます)。"; exit 1; };
+        test -f /refs/ref.wav || echo "WARN: /refs/ref.wav がありません。.env の SHABERI_ASSETS に ref.wav を含むディレクトリを指定してください(TTS の参照音声に必要)。";
         source /root/conda/etc/profile.d/conda.sh && conda activate base &&
         exec python api_v2.py -a 0.0.0.0 -p 9880 -c GPT_SoVITS/configs/tts_infer.yaml
     environment:
