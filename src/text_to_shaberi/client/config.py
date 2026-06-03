@@ -24,12 +24,17 @@ class VADConfig:
     engine: str = "webrtc"
     min_silence_ms: int = 500
     speech_pad_ms: int = 150
+    aggressiveness: int = 2
+    frame_ms: int = 30
+    min_speech_ms: int = 200
+    max_speech_ms: int = 30000
 
 
 @dataclass(slots=True)
 class MicPreprocessConfig:
     gate: bool = True
     denoise: str = "off"
+    gate_threshold: int = 200
 
 
 @dataclass(slots=True)
@@ -62,18 +67,21 @@ class ClientConfig:
 
 def load_client_config(path: str | Any) -> ClientConfig:
     raw = load_toml(path)
+    mic_raw = raw.get("mic") or {}
+    preprocess_raw = mic_raw.get("preprocess") or {}
+    vad_raw = mic_raw.get("vad") or {}
     return ClientConfig(
-        server=ServerConfig(**_only(raw.get("server", {}), ServerConfig)),
-        output=OutputConfig(**_only(raw.get("output", {}), OutputConfig)),
+        server=ServerConfig(**_only(raw.get("server") or {}, ServerConfig)),
+        output=OutputConfig(**_only(raw.get("output") or {}, OutputConfig)),
         mic=MicConfig(
-            device=raw.get("mic", {}).get("device", "default"),
-            sample_rate=int(raw.get("mic", {}).get("sample_rate", 16000)),
-            channels=int(raw.get("mic", {}).get("channels", 1)),
+            device=mic_raw.get("device", "default"),
+            sample_rate=int(mic_raw.get("sample_rate", 16000)),
+            channels=int(mic_raw.get("channels", 1)),
             preprocess=MicPreprocessConfig(
-                **_only(raw.get("mic", {}).get("preprocess", {}), MicPreprocessConfig)
+                **_only(preprocess_raw, MicPreprocessConfig)
             ),
-            vad=VADConfig(**_only(raw.get("mic", {}).get("vad", {}), VADConfig)),
+            vad=VADConfig(**_only(vad_raw, VADConfig)),
         ),
-        ui=UIConfig(**_only(raw.get("ui", {}), UIConfig)),
-        profile=ProfileConfig(**_only(raw.get("profile", {}), ProfileConfig)),
+        ui=UIConfig(**_only(raw.get("ui") or {}, UIConfig)),
+        profile=ProfileConfig(**_only(raw.get("profile") or {}, ProfileConfig)),
     )

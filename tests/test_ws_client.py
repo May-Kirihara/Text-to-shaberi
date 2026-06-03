@@ -2,6 +2,8 @@
 
 pytest-asyncio 不使用。asyncio.run で完結。
 websockets.serve で fake サーバを立てる。
+C1: speak/side-band/terminal/cancel/token/default_profile/rollback。
+C2: STT送信/自動tts連鎖/空文字起こし/エラー/キャンセル/atomic送信/自動tts降格。
 """
 from __future__ import annotations
 
@@ -24,6 +26,9 @@ from text_to_shaberi.common.protocol import (
     Ready,
     Speak,
     Stopped,
+    SttBegin,
+    SttEnd,
+    Transcript,
     parse_message,
 )
 
@@ -61,31 +66,6 @@ class FakeSinkFactory:
         return sink
 
 
-async def _fake_server_handler(websocket, messages_to_send, received_messages):
-    async for raw in websocket:
-        if isinstance(raw, str):
-            msg = parse_message(json.loads(raw))
-            received_messages.append(msg)
-            if isinstance(msg, Hello):
-                for m in messages_to_send.get("hello_response", []):
-                    if isinstance(m, bytes):
-                        await websocket.send(m)
-                    else:
-                        await websocket.send(m.model_dump_json())
-            elif isinstance(msg, Speak):
-                for m in messages_to_send.get("speak_response", []):
-                    if isinstance(m, bytes):
-                        await websocket.send(m)
-                    else:
-                        await websocket.send(m.model_dump_json())
-            elif isinstance(msg, Cancel):
-                for m in messages_to_send.get("cancel_response", []):
-                    if isinstance(m, bytes):
-                        await websocket.send(m)
-                    else:
-                        await websocket.send(m.model_dump_json())
-
-
 def _run_test(coroutine):
     return asyncio.run(coroutine)
 
@@ -102,7 +82,6 @@ class TestWSClient:
                 tts=AudioFormatPayload(codec="pcm_s16le", sample_rate=32000, channels=1),
                 profiles=[],
             )
-            speak_id_holder = [""]
 
             async def handler(websocket):
                 async for raw in websocket:
@@ -112,7 +91,6 @@ class TestWSClient:
                         if isinstance(msg, Hello):
                             await websocket.send(ready_msg.model_dump_json())
                         elif isinstance(msg, Speak):
-                            speak_id_holder[0] = msg.id
                             await websocket.send(
                                 AudioBegin(id=msg.id, format=AudioFormatPayload()).model_dump_json()
                             )
@@ -122,19 +100,10 @@ class TestWSClient:
             async with websockets.serve(handler, "127.0.0.1", 0) as server:
                 port = server.sockets[0].getsockname()[1]
 
-                logs: list[str] = []
-                states: list[tuple] = []
-
-                def on_log(msg):
-                    logs.append(msg)
-
-                def on_state(event, payload=None):
-                    states.append((event, payload))
-
                 ws = WSClient(
                     f"ws://127.0.0.1:{port}/ws",
-                    on_log=on_log,
-                    on_state=on_state,
+                    on_log=lambda m: None,
+                    on_state=lambda e, p=None: None,
                     sink_factory=sink_factory,
                     loop=asyncio.get_event_loop(),
                 )
@@ -175,13 +144,10 @@ class TestWSClient:
             async with websockets.serve(handler, "127.0.0.1", 0) as server:
                 port = server.sockets[0].getsockname()[1]
 
-                logs: list[str] = []
-                states: list[tuple] = []
-
                 ws = WSClient(
                     f"ws://127.0.0.1:{port}/ws",
-                    on_log=logs.append,
-                    on_state=lambda e, p=None: states.append((e, p)),
+                    on_log=lambda m: None,
+                    on_state=lambda e, p=None: None,
                     sink_factory=sink_factory,
                     loop=asyncio.get_event_loop(),
                 )
@@ -211,13 +177,11 @@ class TestWSClient:
 
             async with websockets.serve(handler, "127.0.0.1", 0) as server:
                 port = server.sockets[0].getsockname()[1]
-                logs: list[str] = []
-                states: list[tuple] = []
 
                 ws = WSClient(
                     f"ws://127.0.0.1:{port}/ws",
-                    on_log=logs.append,
-                    on_state=lambda e, p=None: states.append((e, p)),
+                    on_log=lambda m: None,
+                    on_state=lambda e, p=None: None,
                     sink_factory=sink_factory,
                     loop=asyncio.get_event_loop(),
                 )
@@ -270,13 +234,11 @@ class TestWSClient:
 
             async with websockets.serve(handler, "127.0.0.1", 0) as server:
                 port = server.sockets[0].getsockname()[1]
-                logs: list[str] = []
-                states: list[tuple] = []
 
                 ws = WSClient(
                     f"ws://127.0.0.1:{port}/ws",
-                    on_log=logs.append,
-                    on_state=lambda e, p=None: states.append((e, p)),
+                    on_log=lambda m: None,
+                    on_state=lambda e, p=None: None,
                     sink_factory=sink_factory,
                     loop=asyncio.get_event_loop(),
                 )
@@ -336,6 +298,9 @@ class TestWSClient:
                         if isinstance(msg, Hello):
                             await websocket.send(Ready(session_id="t").model_dump_json())
                         elif isinstance(msg, Speak):
+                            await websocket.send(
+                                AudioBegin(id=msg.id, format=AudioFormatPayload()).model_dump_json()
+                            )
                             await websocket.send(AudioEnd(id=msg.id).model_dump_json())
 
             async with websockets.serve(handler, "127.0.0.1", 0) as server:
@@ -352,7 +317,6 @@ class TestWSClient:
                 speaks = [m for m in received if isinstance(m, Speak)]
                 assert speaks and speaks[0].profile == "gpt-sovits"
 
-                # 明示 profile は default を上書き
                 await ws.speak("テスト2", profile="other")
                 await asyncio.sleep(0.15)
                 speaks = [m for m in received if isinstance(m, Speak)]
@@ -397,6 +361,487 @@ class TestWSClient:
                 assert ws._active_id is None
                 idle_events = [s for s in states if s[0] == "idle"]
                 assert len(idle_events) >= 1
+
+                await ws.close()
+
+        _run_test(go())
+
+
+class TestWSClientSTT:
+    def test_utter_sends_stt_begin_binary_end(self):
+        async def go():
+            received_texts: list[str] = []
+            received_binaries: list[bytes] = []
+
+            async def handler(websocket):
+                async for raw in websocket:
+                    if isinstance(raw, bytes):
+                        received_binaries.append(raw)
+                        continue
+                    if isinstance(raw, str):
+                        msg = parse_message(json.loads(raw))
+                        received_texts.append(raw)
+                        if isinstance(msg, Hello):
+                            await websocket.send(Ready(
+                                session_id="t",
+                                features={"auto_tts": True},
+                            ).model_dump_json())
+                        elif isinstance(msg, SttEnd):
+                            stt_id = msg.id
+                            await websocket.send(Transcript(id=stt_id, text="こんにちは", final=True).model_dump_json())
+                            tts_id = f"tts-{stt_id}"
+                            await websocket.send(AudioBegin(
+                                id=tts_id, parent_id=stt_id,
+                                format=AudioFormatPayload(),
+                            ).model_dump_json())
+                            await websocket.send(b"\x00\x00" * 100)
+                            await websocket.send(AudioEnd(id=tts_id).model_dump_json())
+
+            async with websockets.serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+                sink_factory = FakeSinkFactory()
+                logs: list[str] = []
+                states: list[tuple] = []
+
+                ws = WSClient(
+                    f"ws://127.0.0.1:{port}/ws",
+                    on_log=logs.append,
+                    on_state=lambda e, p=None: states.append((e, p)),
+                    sink_factory=sink_factory,
+                    loop=asyncio.get_event_loop(),
+                )
+                await ws.connect()
+                pcm = b"\x00\x01" * 1000
+                await ws.utter(pcm, auto_tts=True)
+                await asyncio.sleep(0.5)
+
+                stt_begins = [json.loads(t) for t in received_texts if json.loads(t).get("type") == "stt_begin"]
+                assert len(stt_begins) == 1
+                assert stt_begins[0]["format"]["channels"] == 1
+                assert stt_begins[0]["auto_tts"] is True
+                assert len(received_binaries) > 0
+
+                stt_ends = [json.loads(t) for t in received_texts if json.loads(t).get("type") == "stt_end"]
+                assert len(stt_ends) == 1
+
+                assert ws._active_id is None
+                transcript_states = [s for s in states if s[0] == "transcript"]
+                assert len(transcript_states) == 1
+                assert transcript_states[0][1] == "こんにちは"
+
+                assert sink_factory.last_sink is not None
+                rec = sink_factory.last_sink.records
+                assert any(r[0] == "begin" for r in rec)
+                assert any(r[0] == "feed" for r in rec)
+                assert any(r[0] == "end" for r in rec)
+
+                await ws.close()
+
+        _run_test(go())
+
+    def test_utter_empty_transcript_no_audio(self):
+        async def go():
+            async def handler(websocket):
+                async for raw in websocket:
+                    if isinstance(raw, str):
+                        msg = parse_message(json.loads(raw))
+                        if isinstance(msg, Hello):
+                            await websocket.send(Ready(
+                                session_id="t",
+                                features={"auto_tts": True},
+                            ).model_dump_json())
+                        elif isinstance(msg, SttEnd):
+                            await websocket.send(Transcript(id=msg.id, text="", final=True).model_dump_json())
+
+            async with websockets.serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+                sink_factory = FakeSinkFactory()
+                states: list[tuple] = []
+
+                ws = WSClient(
+                    f"ws://127.0.0.1:{port}/ws",
+                    on_log=lambda m: None,
+                    on_state=lambda e, p=None: states.append((e, p)),
+                    sink_factory=sink_factory,
+                    loop=asyncio.get_event_loop(),
+                )
+                await ws.connect()
+                await ws.utter(b"\x00" * 1000, auto_tts=True)
+                await asyncio.sleep(0.3)
+
+                assert ws._active_id is None
+                assert sink_factory.last_sink is None
+                idle_events = [s for s in states if s[0] == "idle"]
+                assert len(idle_events) >= 1
+
+                await ws.close()
+
+        _run_test(go())
+
+    def test_auto_tts_error_terminal(self):
+        async def go():
+            async def handler(websocket):
+                async for raw in websocket:
+                    if isinstance(raw, str):
+                        msg = parse_message(json.loads(raw))
+                        if isinstance(msg, Hello):
+                            await websocket.send(Ready(
+                                session_id="t",
+                                features={"auto_tts": True},
+                            ).model_dump_json())
+                        elif isinstance(msg, SttEnd):
+                            stt_id = msg.id
+                            await websocket.send(Transcript(id=stt_id, text="test", final=True).model_dump_json())
+                            tts_id = f"tts-{stt_id}"
+                            await websocket.send(AudioBegin(
+                                id=tts_id, parent_id=stt_id,
+                                format=AudioFormatPayload(),
+                            ).model_dump_json())
+                            await websocket.send(ErrorMsg(id=tts_id, message="TTS failed").model_dump_json())
+
+            async with websockets.serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+                sink_factory = FakeSinkFactory()
+                logs: list[str] = []
+                states: list[tuple] = []
+
+                ws = WSClient(
+                    f"ws://127.0.0.1:{port}/ws",
+                    on_log=logs.append,
+                    on_state=lambda e, p=None: states.append((e, p)),
+                    sink_factory=sink_factory,
+                    loop=asyncio.get_event_loop(),
+                )
+                await ws.connect()
+                await ws.utter(b"\x00" * 1000, auto_tts=True)
+                await asyncio.sleep(0.3)
+
+                assert ws._active_id is None
+                assert any("TTS失敗" in l for l in logs)
+                error_states = [s for s in states if s[0] == "error"]
+                assert len(error_states) >= 1
+
+                await ws.close()
+
+        _run_test(go())
+
+    def test_stt_error_terminal(self):
+        async def go():
+            async def handler(websocket):
+                async for raw in websocket:
+                    if isinstance(raw, str):
+                        msg = parse_message(json.loads(raw))
+                        if isinstance(msg, Hello):
+                            await websocket.send(Ready(
+                                session_id="t",
+                                features={"auto_tts": True},
+                            ).model_dump_json())
+                        elif isinstance(msg, SttEnd):
+                            await websocket.send(ErrorMsg(id=msg.id, message="STT failed").model_dump_json())
+
+            async with websockets.serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+                sink_factory = FakeSinkFactory()
+                logs: list[str] = []
+                states: list[tuple] = []
+
+                ws = WSClient(
+                    f"ws://127.0.0.1:{port}/ws",
+                    on_log=logs.append,
+                    on_state=lambda e, p=None: states.append((e, p)),
+                    sink_factory=sink_factory,
+                    loop=asyncio.get_event_loop(),
+                )
+                await ws.connect()
+                await ws.utter(b"\x00" * 1000, auto_tts=True)
+                await asyncio.sleep(0.3)
+
+                assert ws._active_id is None
+                assert any("STT/プロファイル失敗" in l for l in logs)
+
+                await ws.close()
+
+        _run_test(go())
+
+    def test_capture_reset_error_then_next_utter(self):
+        async def go():
+            utter_count = [0]
+
+            async def handler(websocket):
+                async for raw in websocket:
+                    if isinstance(raw, str):
+                        msg = parse_message(json.loads(raw))
+                        if isinstance(msg, Hello):
+                            await websocket.send(Ready(
+                                session_id="t",
+                                features={"auto_tts": True},
+                            ).model_dump_json())
+                        elif isinstance(msg, SttBegin):
+                            pass
+                        elif isinstance(msg, SttEnd):
+                            utter_count[0] += 1
+                            if utter_count[0] == 1:
+                                await websocket.send(ErrorMsg(
+                                    id=msg.id, message="stt audio too large",
+                                ).model_dump_json())
+                            else:
+                                await websocket.send(Transcript(
+                                    id=msg.id, text="OK", final=True,
+                                ).model_dump_json())
+                    elif isinstance(raw, bytes):
+                        pass
+
+            async with websockets.serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+                logs: list[str] = []
+                states: list[tuple] = []
+
+                ws = WSClient(
+                    f"ws://127.0.0.1:{port}/ws",
+                    on_log=logs.append,
+                    on_state=lambda e, p=None: states.append((e, p)),
+                    sink_factory=FakeSinkFactory(),
+                    loop=asyncio.get_event_loop(),
+                )
+                await ws.connect()
+
+                await ws.utter(b"\x00" * 1000, auto_tts=True)
+                await asyncio.sleep(0.3)
+
+                assert ws._active_id is None
+
+                await ws.utter(b"\x00" * 500, auto_tts=True)
+                await asyncio.sleep(0.3)
+
+                assert utter_count[0] == 2
+
+                await ws.close()
+
+        _run_test(go())
+
+    def test_channels_always_1(self):
+        async def go():
+            received_texts: list[str] = []
+
+            async def handler(websocket):
+                async for raw in websocket:
+                    if isinstance(raw, str):
+                        received_texts.append(raw)
+                        msg = parse_message(json.loads(raw))
+                        if isinstance(msg, Hello):
+                            await websocket.send(Ready(
+                                session_id="t",
+                                features={"auto_tts": True},
+                            ).model_dump_json())
+                        elif isinstance(msg, SttEnd):
+                            await websocket.send(Transcript(id=msg.id, text="t", final=True).model_dump_json())
+
+            async with websockets.serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+
+                ws = WSClient(
+                    f"ws://127.0.0.1:{port}/ws",
+                    on_log=lambda m: None,
+                    on_state=lambda e, p=None: None,
+                    sink_factory=FakeSinkFactory(),
+                    loop=asyncio.get_event_loop(),
+                    stt_format=AudioFormatPayload(codec="pcm_s16le", sample_rate=16000, channels=2),
+                )
+                await ws.connect()
+                await ws.utter(b"\x00" * 1000, auto_tts=False)
+                await asyncio.sleep(0.2)
+
+                stt_begins = [json.loads(t) for t in received_texts if json.loads(t).get("type") == "stt_begin"]
+                assert len(stt_begins) == 1
+                assert stt_begins[0]["format"]["channels"] == 1
+
+                await ws.close()
+
+        _run_test(go())
+
+    def test_auto_tts_degradation(self):
+        async def go():
+            received_texts: list[str] = []
+
+            async def handler(websocket):
+                async for raw in websocket:
+                    if isinstance(raw, str):
+                        received_texts.append(raw)
+                        msg = parse_message(json.loads(raw))
+                        if isinstance(msg, Hello):
+                            await websocket.send(Ready(session_id="t").model_dump_json())
+                        elif isinstance(msg, SttEnd):
+                            await websocket.send(Transcript(id=msg.id, text="t", final=True).model_dump_json())
+
+            async with websockets.serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+                logs: list[str] = []
+
+                ws = WSClient(
+                    f"ws://127.0.0.1:{port}/ws",
+                    on_log=logs.append,
+                    on_state=lambda e, p=None: None,
+                    sink_factory=FakeSinkFactory(),
+                    loop=asyncio.get_event_loop(),
+                )
+                await ws.connect()
+                await ws.utter(b"\x00" * 1000, auto_tts=True)
+                await asyncio.sleep(0.2)
+
+                stt_begins = [json.loads(t) for t in received_texts if json.loads(t).get("type") == "stt_begin"]
+                assert len(stt_begins) == 1
+                assert stt_begins[0]["auto_tts"] is False
+                assert any("auto_tts 非対応" in l for l in logs)
+
+                await ws.close()
+
+        _run_test(go())
+
+    def test_cancel_sends_active_id_not_tts_id(self):
+        async def go():
+            received: list = []
+
+            async def handler(websocket):
+                async for raw in websocket:
+                    if isinstance(raw, str):
+                        msg = parse_message(json.loads(raw))
+                        received.append(msg)
+                        if isinstance(msg, Hello):
+                            await websocket.send(Ready(
+                                session_id="t",
+                                features={"auto_tts": True},
+                            ).model_dump_json())
+                        elif isinstance(msg, SttEnd):
+                            stt_id = msg.id
+                            await websocket.send(Transcript(id=stt_id, text="hi", final=True).model_dump_json())
+                            tts_id = f"tts-{stt_id}"
+                            await websocket.send(AudioBegin(
+                                id=tts_id, parent_id=stt_id,
+                                format=AudioFormatPayload(),
+                            ).model_dump_json())
+                        elif isinstance(msg, Cancel):
+                            await websocket.send(Stopped(id=f"tts-{msg.id}").model_dump_json())
+
+            async with websockets.serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+                sink_factory = FakeSinkFactory()
+                states: list[tuple] = []
+
+                ws = WSClient(
+                    f"ws://127.0.0.1:{port}/ws",
+                    on_log=lambda m: None,
+                    on_state=lambda e, p=None: states.append((e, p)),
+                    sink_factory=sink_factory,
+                    loop=asyncio.get_event_loop(),
+                )
+                await ws.connect()
+                await ws.utter(b"\x00" * 1000, auto_tts=True)
+                await asyncio.sleep(0.3)
+                await ws.cancel()
+                await asyncio.sleep(0.3)
+
+                cancels = [m for m in received if isinstance(m, Cancel)]
+                assert len(cancels) == 1
+                assert not cancels[0].id.startswith("tts-")
+
+                assert ws._active_id is None
+
+                await ws.close()
+
+        _run_test(go())
+
+    def test_utter_send_failure_rollback(self):
+        async def go():
+            async def handler(websocket):
+                async for raw in websocket:
+                    if isinstance(raw, str):
+                        msg = parse_message(json.loads(raw))
+                        if isinstance(msg, Hello):
+                            await websocket.send(Ready(session_id="t").model_dump_json())
+
+            async with websockets.serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+                logs: list[str] = []
+                states: list[tuple] = []
+
+                ws = WSClient(
+                    f"ws://127.0.0.1:{port}/ws",
+                    on_log=logs.append,
+                    on_state=lambda e, p=None: states.append((e, p)),
+                    sink_factory=FakeSinkFactory(),
+                    loop=asyncio.get_event_loop(),
+                )
+                await ws.connect()
+
+                async def failing_send(payload):
+                    raise ConnectionError("send failed")
+
+                ws._ws_send = failing_send
+                await ws.utter(b"\x00" * 1000, auto_tts=True)
+                await asyncio.sleep(0.1)
+
+                assert ws._active_id is None
+                idle_events = [s for s in states if s[0] == "idle"]
+                assert len(idle_events) >= 1
+
+                await ws.close()
+
+        _run_test(go())
+
+    def test_utter_atomic_send_cancel_after_stt_end(self):
+        async def go():
+            received: list = []
+
+            async def handler(websocket):
+                async for raw in websocket:
+                    if isinstance(raw, str):
+                        msg = parse_message(json.loads(raw))
+                        received.append(msg)
+                        if isinstance(msg, Hello):
+                            await websocket.send(Ready(
+                                session_id="t",
+                                features={"auto_tts": True},
+                            ).model_dump_json())
+                        elif isinstance(msg, SttEnd):
+                            stt_id = msg.id
+                            await websocket.send(Transcript(id=stt_id, text="", final=True).model_dump_json())
+                        elif isinstance(msg, Cancel):
+                            await websocket.send(Stopped(id=msg.id).model_dump_json())
+                    elif isinstance(raw, bytes):
+                        pass
+
+            async with websockets.serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+                states: list[tuple] = []
+
+                ws = WSClient(
+                    f"ws://127.0.0.1:{port}/ws",
+                    on_log=lambda m: None,
+                    on_state=lambda e, p=None: states.append((e, p)),
+                    sink_factory=FakeSinkFactory(),
+                    loop=asyncio.get_event_loop(),
+                )
+                await ws.connect()
+
+                pcm = b"\x00" * 50000
+                await ws.utter(pcm, auto_tts=True)
+                await asyncio.sleep(0.5)
+
+                stt_ends = [m for m in received if isinstance(m, SttEnd)]
+                cancels = [m for m in received if isinstance(m, Cancel)]
+
+                assert len(stt_ends) == 1
+
+                if cancels:
+                    stt_end_idx = next(
+                        i for i, m in enumerate(received) if isinstance(m, SttEnd)
+                    )
+                    cancel_idx = next(
+                        i for i, m in enumerate(received) if isinstance(m, Cancel)
+                    )
+                    assert cancel_idx > stt_end_idx
+
+                assert ws._active_id is None
 
                 await ws.close()
 

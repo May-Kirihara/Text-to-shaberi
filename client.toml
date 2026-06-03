@@ -14,12 +14,17 @@ device      = "default"
 sample_rate = 16000
 channels    = 1
 [mic.preprocess]
-gate    = true                   # 軽量ノイズゲート（MVP既定ON）
-denoise = "off"                  # off | rnnoise | noisereduce
+gate           = true            # 軽量ノイズゲート（MVP既定ON）
+denoise        = "off"           # off | rnnoise | noisereduce
+gate_threshold = 200             # int16 RMS 閾値（≈-44dBFS）
 [mic.vad]
-engine         = "webrtc"        # webrtc | silero（R0では設定値のみ・importしない）
-min_silence_ms = 500
-speech_pad_ms  = 150
+engine          = "webrtc"       # webrtc | silero（R0では設定値のみ・importしない）
+min_silence_ms  = 500
+speech_pad_ms   = 150
+aggressiveness  = 2              # 0(緩い)〜3(厳しい)
+frame_ms        = 30             # 10 | 20 | 30
+min_speech_ms   = 200            # 短バースト破棄閾値
+max_speech_ms   = 30000          # 強制確定上限（サーバ60s手前）
 
 [ui]
 # 日本語入力の方式

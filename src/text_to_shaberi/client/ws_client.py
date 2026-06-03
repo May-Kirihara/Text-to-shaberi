@@ -1,6 +1,7 @@
-"""WebSocket クライアント（C1 本実装）。
+"""WebSocket クライアント（C1 本実装 + C2 STT/auto_tts 拡張）。
 
 hello→ready、speak→audio_begin+binary×N+audio_end、cancel→stopped を処理。
+C2: utter(pcm)→stt_begin+binary×N+stt_end→transcript→auto_tts audio 連鎖。
 受信(asyncio)→再生(別スレッド) を PlaybackSink で橋渡し。
 """
 from __future__ import annotations
@@ -17,12 +18,16 @@ import websockets
 from ..common.protocol import (
     AudioBegin,
     AudioEnd,
+    AudioFormatPayload,
     Cancel,
     ErrorMsg,
     Hello,
     Ready,
     Speak,
     Stopped,
+    SttBegin,
+    SttEnd,
+    Transcript,
     parse_message,
 )
 from .audio.devices import resolve_device
@@ -43,6 +48,7 @@ class WSClient:
         sink_factory: Callable[..., Any] = PlaybackSink,
         loop: asyncio.AbstractEventLoop | None = None,
         default_profile: str = "",
+        stt_format: AudioFormatPayload | None = None,
     ) -> None:
         self._address = address
         self._token = token
@@ -52,16 +58,23 @@ class WSClient:
         self._sink_factory = sink_factory
         self._loop = loop
         self._default_profile = default_profile
+        self._stt_format = stt_format or AudioFormatPayload(
+            codec="pcm_s16le", sample_rate=16000, channels=1
+        )
 
         self._ws: Any = None
         self._recv_task: asyncio.Task | None = None
         self._active_id: str | None = None
+        self._playback_id: str | None = None
+        self._stt_auto_tts: bool = False
         self._sink: Any = None
         self._ready: Ready | None = None
         self._t_send: float | None = None
         self._first_chunk_logged: bool = False
         self._cancelling: bool = False
         self._profiles: list = []
+        self._send_lock = asyncio.Lock()
+        self._auto_tts_warned = False
 
     def _log(self, msg: str) -> None:
         if self._on_log:
@@ -132,6 +145,8 @@ class WSClient:
 
         id_ = uuid.uuid4().hex
         self._active_id = id_
+        self._playback_id = None
+        self._stt_auto_tts = False
         self._t_send = loop.time()
         self._first_chunk_logged = False
         self._cancelling = False
@@ -145,6 +160,52 @@ class WSClient:
             self._finish_stream()
             self._state("error", str(exc))
 
+    async def utter(self, pcm: bytes, auto_tts: bool = True, chunk_bytes: int = 32768) -> None:
+        loop = self._loop or asyncio.get_event_loop()
+
+        if self._ws is None:
+            ok = await self.connect()
+            if not ok:
+                self._log("接続できません")
+                return
+
+        eff_auto = auto_tts and bool(
+            self._ready and self._ready.features.get("auto_tts")
+        )
+        if auto_tts and not eff_auto and not self._auto_tts_warned:
+            self._log("[warn] サーバが auto_tts 非対応: 認識のみへ降格")
+            self._auto_tts_warned = True
+
+        if self._active_id is not None:
+            self._log("発話中のためスキップ")
+            return
+
+        id_ = uuid.uuid4().hex
+        self._active_id = id_
+        self._playback_id = None
+        self._stt_auto_tts = eff_auto
+        self._cancelling = False
+        self._first_chunk_logged = False
+        self._t_send = loop.time()
+        self._state("busy")
+
+        fmt = AudioFormatPayload(
+            codec="pcm_s16le",
+            sample_rate=self._stt_format.sample_rate,
+            channels=1,
+        )
+
+        try:
+            async with self._send_lock:
+                await self._ws_send(SttBegin(id=id_, format=fmt, auto_tts=eff_auto).model_dump_json())
+                for i in range(0, len(pcm), chunk_bytes):
+                    await self._ws_send(pcm[i : i + chunk_bytes])
+                await self._ws_send(SttEnd(id=id_).model_dump_json())
+        except Exception as exc:
+            self._finish_stream()
+            self._state("error", str(exc))
+            return
+
     async def cancel(self) -> None:
         if self._active_id is None:
             self._log("cancel: active 無し")
@@ -156,6 +217,9 @@ class WSClient:
             await self._send(Cancel(id=self._active_id))
         except Exception:
             pass
+
+    def is_busy(self) -> bool:
+        return self._active_id is not None
 
     async def close(self) -> None:
         if self._recv_task is not None:
@@ -177,7 +241,11 @@ class WSClient:
             self._ws = None
 
     async def _send(self, model: Any) -> None:
-        await self._ws.send(model.model_dump_json())
+        async with self._send_lock:
+            await self._ws.send(model.model_dump_json())
+
+    async def _ws_send(self, payload: Any) -> None:
+        await self._ws.send(payload)
 
     def _resolve_device(self) -> int | None:
         if self._device_provider is None:
@@ -218,7 +286,7 @@ class WSClient:
                 self._finish_stream()
 
     def _on_binary(self, raw: bytes) -> None:
-        if not self._active_id or self._sink is None or self._cancelling:
+        if not self._active_id or not self._playback_id or self._sink is None or self._cancelling:
             return
 
         ok = self._sink.feed(raw)
@@ -251,7 +319,12 @@ class WSClient:
             return
 
         if isinstance(msg, AudioBegin):
-            if msg.id == self._active_id and not self._cancelling:
+            if (
+                not self._cancelling
+                and self._active_id is not None
+                and (msg.id == self._active_id or msg.parent_id == self._active_id)
+            ):
+                self._playback_id = msg.id
                 fmt = msg.format
                 if fmt is None and self._ready is not None:
                     fmt = self._ready.tts
@@ -265,8 +338,19 @@ class WSClient:
                 self._log(f"side-band audio_begin (id={msg.id})")
             return
 
-        if isinstance(msg, AudioEnd):
+        if isinstance(msg, Transcript):
             if msg.id == self._active_id:
+                text = msg.text
+                self._log(f"🎤→ {text}")
+                self._state("transcript", text)
+                if self._cancelling:
+                    self._finish_stream()
+                elif not (self._stt_auto_tts and text.strip()):
+                    self._finish_stream()
+            return
+
+        if isinstance(msg, AudioEnd):
+            if msg.id == self._playback_id:
                 if self._cancelling:
                     self._finish_stream()
                 else:
@@ -276,14 +360,18 @@ class WSClient:
             return
 
         if isinstance(msg, Stopped):
-            if msg.id == self._active_id:
+            if msg.id in {self._active_id, self._playback_id}:
                 self._log("stopped")
                 self._finish_stream()
             return
 
         if isinstance(msg, ErrorMsg):
             msg_id = getattr(msg, "id", None)
-            if msg_id == self._active_id:
+            if msg_id in {self._active_id, self._playback_id}:
+                if msg_id == self._playback_id:
+                    self._log(f"TTS失敗: {msg.message}")
+                else:
+                    self._log(f"STT/プロファイル失敗: {msg.message}")
                 if self._cancelling:
                     self._finish_stream()
                 else:
@@ -300,6 +388,8 @@ class WSClient:
     def _finish_stream(self) -> None:
         self._sink = None
         self._active_id = None
+        self._playback_id = None
+        self._stt_auto_tts = False
         self._cancelling = False
         self._first_chunk_logged = False
         self._state("idle")

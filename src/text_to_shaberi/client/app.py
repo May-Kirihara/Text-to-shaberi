@@ -3,10 +3,12 @@
 - `text-to-shaberi-client`        … GUI 起動
 - `text-to-shaberi-client --check` … GUIを起動せず設定/デバイスのロードを検査
 C1: WSClient/PlaybackSink 配線・on_speak/on_stop/on_settings・startup接続・再接続。
+C2: MicCapture 配線・on_mic_toggle/on_segment・ハーフデュプレックス・stt_format。
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -92,6 +94,7 @@ def run_gui(config_path: str | Path) -> None:
     import qasync
     from PySide6.QtWidgets import QApplication
 
+    from ..common.protocol import AudioFormatPayload
     from .ui.main_window import MainWindow
     from .ws_client import WSClient
     from .settings_store import update_client_toml
@@ -121,13 +124,26 @@ def run_gui(config_path: str | Path) -> None:
         device_provider=window.selected_output_device,
         loop=loop,
         default_profile=cfg.profile.active_id,
+        stt_format=AudioFormatPayload(
+            codec="pcm_s16le",
+            sample_rate=cfg.mic.sample_rate,
+            channels=cfg.mic.channels,
+        ),
     )
+
+    mic_holder: list = [None]
 
     def _on_state(event: str, payload: object = None) -> None:
         if event == "ready":
             window.set_connection("\u2713")
             nonlocal _profiles
             _profiles = payload.profiles if payload else []
+            has_auto_tts = payload.features.get("auto_tts") if payload else False
+            if not has_auto_tts:
+                window.log("[mic] サーバが auto_tts 非対応: 認識のみ")
+                window.set_mic_enabled(False)
+            else:
+                window.set_mic_enabled(True)
         elif event == "busy":
             window.set_busy(True)
         elif event == "idle":
@@ -167,9 +183,49 @@ def run_gui(config_path: str | Path) -> None:
             ws._default_profile = vals["active_id"]
             asyncio.ensure_future(ws.reconnect(vals["address"], vals["token"]))
 
+    _last_skip_log = [0.0]
+
+    def on_segment(seg: bytes) -> None:
+        if ws.is_busy():
+            now = loop.time()
+            if now - _last_skip_log[0] >= 1.0:
+                window.log("[mic] 発話中につきスキップ")
+                _last_skip_log[0] = now
+            return
+        asyncio.ensure_future(ws.utter(seg, auto_tts=True))
+
+    def on_mic_toggle(active: bool) -> None:
+        if active:
+            if mic_holder[0] is None:
+                from .audio.mic import MicCapture
+                from .audio.devices import resolve_device
+
+                dev = resolve_device(cfg.mic.device, kind="input")
+                mic_holder[0] = MicCapture(
+                    sample_rate=cfg.mic.sample_rate,
+                    channels=cfg.mic.channels,
+                    device=dev,
+                    frame_ms=cfg.mic.vad.frame_ms,
+                    vad_config=cfg.mic,
+                    on_segment=on_segment,
+                    on_log=window.log,
+                    loop=loop,
+                )
+            try:
+                mic_holder[0].start()
+                window.log("[mic] 録音開始")
+            except Exception as exc:
+                window.log(f"[mic] 開始失敗: {exc}")
+                window.set_mic_active(False)
+        else:
+            if mic_holder[0] is not None:
+                mic_holder[0].stop()
+                window.log("[mic] 録音停止")
+
     window.set_on_speak(on_speak)
     window.set_on_stop(on_stop)
     window.set_on_settings(on_settings)
+    window.set_on_mic_toggle(on_mic_toggle)
 
     window.show()
 
@@ -177,6 +233,13 @@ def run_gui(config_path: str | Path) -> None:
         await ws.connect()
 
     asyncio.ensure_future(_startup())
+
+    async def _shutdown():
+        if mic_holder[0] is not None:
+            await asyncio.to_thread(mic_holder[0].stop)
+        await ws.close()
+
+    app.aboutToQuit.connect(lambda: asyncio.ensure_future(_shutdown()))
 
     with loop:
         loop.run_forever()

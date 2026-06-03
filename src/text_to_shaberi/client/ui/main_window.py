@@ -3,6 +3,7 @@
 R0: MainWindow は ClientConfig のみで生成（旧 config.active_tts_profile/config.stt.backend は参照しない）。
 初期ログは server.address と profile.active_id を表示。
 C1: 歯車ボタン＋接続状態ラベルを追加。
+C2: マイクトグル「🎤」＋set_on_mic_toggle/set_mic_active/set_mic_enabled。
 """
 from __future__ import annotations
 
@@ -20,6 +21,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+_MIC_LABEL_ON = "🎤 ON"
+_MIC_LABEL_OFF = "🎤"
+_MIC_ACCESSIBLE_NAME = "マイク"
+_MIC_TOOLTIP = "マイク常時録音 ON/OFF"
+
 
 class MainWindow(QMainWindow):
     def __init__(self, config, output_devices=None, on_speak: Callable[[str], None] | None = None):
@@ -28,6 +34,7 @@ class MainWindow(QMainWindow):
         self._on_speak = on_speak
         self._on_stop: Callable[[], None] | None = None
         self._on_settings: Callable[[], None] | None = None
+        self._on_mic_toggle: Callable[[bool], None] | None = None
 
         self.setWindowTitle("Text-to-shaberi")
         self.resize(680, 460)
@@ -60,6 +67,15 @@ class MainWindow(QMainWindow):
         self.send_button = QPushButton("送信")
         self.stop_button = QPushButton("停止")
         self.stop_button.setEnabled(False)
+
+        self.mic_button = QPushButton(_MIC_LABEL_OFF)
+        self.mic_button.setCheckable(True)
+        self.mic_button.setAccessibleName(_MIC_ACCESSIBLE_NAME)
+        self.mic_button.setToolTip(_MIC_TOOLTIP)
+        self.mic_button.setFixedWidth(56)
+        self.mic_button.toggled.connect(self._handle_mic_toggle)
+
+        input_row.addWidget(self.mic_button)
         input_row.addWidget(self.text_input, 1)
         input_row.addWidget(self.send_button)
         input_row.addWidget(self.stop_button)
@@ -90,6 +106,19 @@ class MainWindow(QMainWindow):
     def set_on_settings(self, callback: Callable[[], None]) -> None:
         self._on_settings = callback
 
+    def set_on_mic_toggle(self, callback: Callable[[bool], None]) -> None:
+        self._on_mic_toggle = callback
+
+    def set_mic_active(self, active: bool) -> None:
+        self.mic_button.setChecked(active)
+        if active:
+            self.mic_button.setText(_MIC_LABEL_ON)
+        else:
+            self.mic_button.setText(_MIC_LABEL_OFF)
+
+    def set_mic_enabled(self, enabled: bool) -> None:
+        self.mic_button.setEnabled(enabled)
+
     def selected_output_device(self) -> int | None | str:
         return self.device_combo.currentData()
 
@@ -117,6 +146,14 @@ class MainWindow(QMainWindow):
     def _handle_settings(self) -> None:
         if self._on_settings is not None:
             self._on_settings()
+
+    def _handle_mic_toggle(self, checked: bool) -> None:
+        if checked:
+            self.mic_button.setText(_MIC_LABEL_ON)
+        else:
+            self.mic_button.setText(_MIC_LABEL_OFF)
+        if self._on_mic_toggle is not None:
+            self._on_mic_toggle(checked)
 
     def log(self, message: str) -> None:
         self.log_view.appendPlainText(message)
