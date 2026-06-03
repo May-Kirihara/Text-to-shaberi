@@ -26,7 +26,7 @@ services:
         test -f /workspace/GPT-SoVITS/api_v2.py || { echo "FATAL: /workspace/GPT-SoVITS に api_v2.py がありません。.env の GPTSOVITS_DIR がこのホスト上の GPT-SoVITS リポジトリ(重み込み)を指しているか確認してください(マウント元が空/誤りだとイメージのコードが隠れます)。"; exit 1; };
         test -f /refs/ref.wav || echo "WARN: /refs/ref.wav がありません。.env の SHABERI_ASSETS に ref.wav を含むディレクトリを指定してください(TTS の参照音声に必要)。";
         source /root/conda/etc/profile.d/conda.sh && conda activate base &&
-        exec python api_v2.py -a 0.0.0.0 -p 9880 -c GPT_SoVITS/configs/tts_infer.yaml
+        exec python /shaberi/gptsovits_launch.py
     environment:
       - is_half=true
       - PYTHONPATH=/workspace/GPT-SoVITS
@@ -35,6 +35,8 @@ services:
       - ${GPTSOVITS_DIR:-/mnt/holyland/Project/GPT-SoVITS}:/workspace/GPT-SoVITS
       # ref.wav は GPT-SoVITS が「自分のFS」から開く → assets を read-only でマウント
       - ${SHABERI_ASSETS:-./assets}:/refs:ro
+      # api_v2 ランチャ（torchcodec破損回避。secret非露出のため単一ファイルだけマウント）
+      - ./deploy/gptsovits_launch.py:/shaberi/gptsovits_launch.py:ro
     shm_size: "16g"
     networks: [shaberi-net]
     restart: unless-stopped
@@ -63,13 +65,20 @@ services:
       dockerfile: deploy/Dockerfile.server
     image: text-to-shaberi-server:local
     container_name: shaberi-orchestrator
-    command: ["text-to-shaberi-server", "-c", "/app/deploy/server.docker.toml"]
+    command:
+      - bash
+      - -lc
+      - >
+        test -f /app/deploy/server.docker.toml || { echo "FATAL: /app/deploy/server.docker.toml がありません。ホスト側で 'cp deploy/server.docker.toml.example deploy/server.docker.toml' を実行し token を設定してください。"; exit 1; };
+        exec text-to-shaberi-server -c /app/deploy/server.docker.toml
     environment:
       - HF_HOME=/hf
       # 同時 speak+STT のVRAMピークが厳しい場合に有効化:
       # - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     volumes:
-      - ./deploy/server.docker.toml:/app/deploy/server.docker.toml:ro  # secret入り（gitignore）
+      # deploy を「ディレクトリ単位」でマウント。単一ファイルだとマウント元欠損時に
+      # Docker が空ディレクトリを誤生成し IsADirectoryError になるため。
+      - ./deploy:/app/deploy:ro                                        # server.docker.toml(secret/gitignore) を含む
       - ./profiles:/app/profiles:ro                                    # profile を再ビルドなしで編集可
       - hf-cache:/hf                                                   # Qwen 重みを永続化（再DL回避）
     ports:

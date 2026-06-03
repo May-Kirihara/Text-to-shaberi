@@ -375,3 +375,21 @@ deploy:
 ### 9.7 総合判定
 
 中核方針は妥当。HIGH 2件を反映した本節の確定仕様で実ファイルを作成 → `docker compose build/up` の実機検証（§5）へ。
+
+---
+
+## 10. 実機投入で判明した修正（別マシン Mays-Remains での `up` 検証）
+
+開発機(holyland)以外の実機に投入したところ、**bind-mount とイメージ実体まわりで複数の落とし穴**が判明。すべて反映済み。教訓「fake/dev環境は実経路を通らない」の典型。
+
+| # | 症状 | 原因 | 対処（反映済み） |
+|---|---|---|---|
+| 1 | `can't open file '.../api_v2.py'` | `GPTSOVITS_DIR` 既定が holyland 専用パス → 別機で空dirがイメージのコードを隠す | `.env` で実パス必須化＋ compose に fail-fast(`test -f api_v2.py`)＋README注記 |
+| 2 | `IsADirectoryError: '/app/deploy/server.docker.toml'` | 単一ファイル bind-mount のマウント元欠損 → Docker が空dirを誤生成 | **deploy をディレクトリ単位**でマウント＋ orchestrator にも fail-fast(`test -f server.docker.toml`) |
+| 3 | `WARN /refs/ref.wav が無い` だが実在 | `SHABERI_ASSETS` が**ファイル**を指し `/refs` 自体がファイル化（`/refs/ref.wav` 不在） | `.env` は**ディレクトリ**を指す。`.env.example` に明記 |
+| 4 | WS `403 Forbidden` | client token ≠ server `bind.token`（`ws_server.py` が accept 前に close→403） | 両側 token 一致が必須（`0.0.0.0` bind は空token不可）。README に明記 |
+| 5 | TTS時 `Could not load libtorchcodec` (`undefined symbol: torch_from_blob` / `libavutil.so.59 not found`) | **プレビルドイメージの torchcodec が torch2.10と ABI不一致**＋condaに libavutil.so.60(FFmpeg8)のみ → torchaudio.load 全滅 | `deploy/gptsovits_launch.py` で **torchaudio.load を soundfile 実装に差し替え**てから api_v2 起動（イメージ無改変・read-onlyマウント） |
+
+到達済み（このコミット時点）: gpt-sovits Healthy / orchestrator `[opus] True`・Qwn ロード・`0.0.0.0:8765` listen / token一致でWS accept / STT動作 / `POST gpt-sovits:9880/tts 200`。残るは #5 の soundfile 差し替え後の音声出力 E2E（soundfile が image に在ることが前提・GPT-SoVITS依存なので通常在る）。
+
+補足（非ブロッキング）: client が opus capability 非提示で `opus→pcm フォールバック`（Windows 側 opus DLL 未配置時の既知挙動。音は出る）。
