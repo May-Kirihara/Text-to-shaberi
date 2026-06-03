@@ -3,10 +3,12 @@
 出力デバイスは TTS の出力rate（例 32000Hz）を受け付けないことがある（生のALSA hwデバイス等は
 44100/48000固定）。そのため**出力デバイスの既定rateへ soxr で変換**してから再生する。
 M2 で OutputStream を使ったチャンク逐次再生（StreamingPlayer）を追加。
+C1: 遅延スタート・threading.Lock・request_abort/close 分離・factory 注入 seam。
 """
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 import numpy as np
@@ -57,7 +59,8 @@ class StreamingPlayer:
         for chunk in http_stream:
             player.write_bytes(chunk)
         player.close()   # 正常終了（末尾まで鳴らす）
-        # または player.abort()  # 即停止
+        # または player.request_abort()  # 即停止（mainスレッドから）
+        # 続けて worker スレッドで player.close()  # デバイス解放
     """
 
     def __init__(
@@ -66,45 +69,78 @@ class StreamingPlayer:
         channels: int = 1,
         device: int | None = None,
         encoding: str = "pcm_s16le",
-        preroll_ms: int = 40,
+        preroll_ms: int = 80,
+        *,
+        stream_factory=None,
+        resampler_factory=None,
+        target_sr: int | None = None,
     ) -> None:
-        import sounddevice as sd
-        import soxr
-
         self._encoding = encoding
         self._channels = channels
         self._frame_bytes = bytes_per_sample(encoding) * channels
 
-        if device is None:
-            from .devices import preferred_default_output
+        if target_sr is None:
+            import sounddevice as sd
 
-            device = preferred_default_output()
+            if device is None:
+                from .devices import preferred_default_output
 
-        self._target_sr = _device_samplerate(sd, device)
+                device = preferred_default_output()
+            target_sr = _device_samplerate(sd, device)
 
-        self._resampler: soxr.ResampleStream | None = None
+        self._target_sr = target_sr
+
+        self._resampler = None
         if self._target_sr != src_rate:
-            self._resampler = soxr.ResampleStream(
-                src_rate, self._target_sr, channels, dtype="float32", quality="HQ"
+            if resampler_factory is not None:
+                self._resampler = resampler_factory(src_rate, self._target_sr, channels)
+            else:
+                import soxr
+
+                self._resampler = soxr.ResampleStream(
+                    src_rate, self._target_sr, channels, dtype="float32", quality="HQ"
+                )
+
+        self._src_rate = src_rate
+        if stream_factory is not None:
+            self._stream = stream_factory(
+                samplerate=self._target_sr,
+                channels=channels,
+                dtype="float32",
+                device=device,
+                latency="low",
+            )
+        else:
+            import sounddevice as sd
+
+            self._stream = sd.OutputStream(
+                samplerate=self._target_sr,
+                channels=channels,
+                dtype="float32",
+                device=device,
+                latency="low",
             )
 
-        self._stream = sd.OutputStream(
-            samplerate=self._target_sr,
-            channels=channels,
-            dtype="float32",
-            device=device,
-            latency="low",
-        )
-        self._stream.start()
+        self._lock = threading.Lock()
+        self._aborted = False
         self._closed = False
+        self._started_stream = False
 
         self._carry = b""
         self._preroll: list[np.ndarray] = []
         self._preroll_frames = int(self._target_sr * preroll_ms / 1000)
         self._started_audio = False
 
+    def _ensure_started(self) -> None:
+        if not self._started_stream:
+            self._stream.start()
+            self._started_stream = True
+
     def write_bytes(self, data: bytes) -> None:
-        """PCM チャンクを受け取り、サンプル境界に整えてから OutputStream へ書き込む。"""
+        with self._lock:
+            if self._aborted or self._closed:
+                return
+
         full, self._carry = split_full_samples(self._carry + data, self._frame_bytes)
         if not full:
             return
@@ -116,70 +152,89 @@ class StreamingPlayer:
         if len(frames) == 0:
             return
 
-        if not self._started_audio:
-            self._preroll.append(frames)
-            total = sum(len(f) for f in self._preroll)
-            if total >= self._preroll_frames:
-                combined = np.concatenate(self._preroll)
-                self._preroll.clear()
+        with self._lock:
+            if self._aborted or self._closed:
+                return
+
+            if not self._started_audio:
+                self._preroll.append(frames)
+                total = sum(len(f) for f in self._preroll)
+                if total >= self._preroll_frames:
+                    combined = np.concatenate(self._preroll)
+                    self._preroll.clear()
+                    self._ensure_started()
+                    try:
+                        self._stream.write(combined)
+                    except Exception:
+                        self._aborted = True
+                        return
+                    self._started_audio = True
+            else:
                 try:
-                    self._stream.write(combined)
+                    self._stream.write(frames)
                 except Exception:
-                    self.abort()
-                    raise
-                self._started_audio = True
-        else:
-            try:
-                self._stream.write(frames)
-            except Exception:
-                self.abort()
-                raise
+                    self._aborted = True
+                    return
+
+    def request_abort(self) -> None:
+        with self._lock:
+            if self._aborted:
+                return
+            self._aborted = True
+            if self._started_stream:
+                try:
+                    self._stream.abort()
+                except Exception:
+                    pass
 
     def close(self) -> None:
-        """正常終了。resampler 残差を flush し、tail drain 後に stop+close。"""
-        if self._closed:
-            return
-        self._closed = True
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
 
-        tail: np.ndarray | None = None
-        if self._resampler is not None:
-            empty = (
-                np.empty((0,), dtype=np.float32)
-                if self._channels == 1
-                else np.empty((0, self._channels), dtype=np.float32)
-            )
-            tail = self._resampler.resample_chunk(empty, last=True)
+            tail: np.ndarray | None = None
+            if self._resampler is not None:
+                empty = (
+                    np.empty((0,), dtype=np.float32)
+                    if self._channels == 1
+                    else np.empty((0, self._channels), dtype=np.float32)
+                )
+                tail = self._resampler.resample_chunk(empty, last=True)
 
-        chunks: list[np.ndarray] = []
-        if tail is not None and len(tail) > 0:
-            chunks.append(tail)
-        if self._preroll:
-            chunks.extend(self._preroll)
-            self._preroll.clear()
+            chunks: list[np.ndarray] = []
+            if self._preroll:
+                chunks.extend(self._preroll)
+                self._preroll.clear()
+            if tail is not None and len(tail) > 0:
+                chunks.append(tail)
 
-        if chunks:
+            if self._aborted:
+                if self._started_stream:
+                    try:
+                        self._stream.stop()
+                    except Exception:
+                        pass
+                try:
+                    self._stream.close()
+                except Exception:
+                    pass
+                return
+
+            if chunks:
+                self._ensure_started()
+                try:
+                    self._stream.write(np.concatenate(chunks))
+                except Exception:
+                    pass
+
+            if self._started_stream:
+                time.sleep(float(self._stream.latency) + 0.05)
+                try:
+                    self._stream.stop()
+                except Exception:
+                    pass
             try:
-                self._stream.write(np.concatenate(chunks))
+                self._stream.close()
             except Exception:
                 pass
-
-        time.sleep(float(self._stream.latency) + 0.05)
-        try:
-            self._stream.stop()
-            self._stream.close()
-        except Exception:
-            pass
-
-    def abort(self) -> None:
-        """即停止（idempotent）。"""
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            self._stream.abort()
-        except Exception:
-            pass
-        try:
-            self._stream.close()
-        except Exception:
-            pass

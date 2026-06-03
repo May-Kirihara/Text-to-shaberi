@@ -2,6 +2,7 @@
 
 R0: MainWindow は ClientConfig のみで生成（旧 config.active_tts_profile/config.stt.backend は参照しない）。
 初期ログは server.address と profile.active_id を表示。
+C1: 歯車ボタン＋接続状態ラベルを追加。
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ class MainWindow(QMainWindow):
         self.config = config
         self._on_speak = on_speak
         self._on_stop: Callable[[], None] | None = None
+        self._on_settings: Callable[[], None] | None = None
 
         self.setWindowTitle("Text-to-shaberi")
         self.resize(680, 460)
@@ -41,7 +43,16 @@ class MainWindow(QMainWindow):
         for dev in output_devices or []:
             self.device_combo.addItem(f"{dev.name}", dev.index)
         device_row.addWidget(self.device_combo, 1)
+
+        self.settings_button = QPushButton("\u2699")
+        self.settings_button.setFixedWidth(32)
+        self.settings_button.clicked.connect(self._handle_settings)
+        device_row.addWidget(self.settings_button)
+
         layout.addLayout(device_row)
+
+        self.connection_label = QLabel("接続: --")
+        layout.addWidget(self.connection_label)
 
         input_row = QHBoxLayout()
         self.text_input = QLineEdit()
@@ -76,14 +87,19 @@ class MainWindow(QMainWindow):
     def set_on_stop(self, callback: Callable[[], None]) -> None:
         self._on_stop = callback
 
+    def set_on_settings(self, callback: Callable[[], None]) -> None:
+        self._on_settings = callback
+
     def selected_output_device(self) -> int | None | str:
         return self.device_combo.currentData()
 
     def set_busy(self, busy: bool) -> None:
-        """送信中UIの有効/無効を切替（同時発話防止）。"""
         self.text_input.setEnabled(not busy)
         self.send_button.setEnabled(not busy)
         self.stop_button.setEnabled(busy)
+
+    def set_connection(self, text: str) -> None:
+        self.connection_label.setText(f"接続: {text}")
 
     def _handle_send(self) -> None:
         text = self.text_input.text().strip()
@@ -97,6 +113,10 @@ class MainWindow(QMainWindow):
     def _handle_stop(self) -> None:
         if self._on_stop is not None:
             self._on_stop()
+
+    def _handle_settings(self) -> None:
+        if self._on_settings is not None:
+            self._on_settings()
 
     def log(self, message: str) -> None:
         self.log_view.appendPlainText(message)
