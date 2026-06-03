@@ -135,11 +135,100 @@ class TestSettingsStore:
         original = "[server]\naddress = \"ws://x\"\n"
         p.write_text(original, encoding="utf-8")
 
-        class BadStr:
+        class BadObj:
             def __str__(self):
-                return "ok"
+                raise RuntimeError("bad")
 
         with pytest.raises(Exception):
-            update_client_toml(p, {"server": {"address": BadStr()}})
+            update_client_toml(p, {"server": {"address": BadObj()}})
 
         assert p.read_text(encoding="utf-8") == original
+
+    def test_bool_value_written_as_true_false(self, tmp_path):
+        p = tmp_path / "client.toml"
+        p.write_text("[server]\naddress = \"ws://x\"\n", encoding="utf-8")
+        update_client_toml(p, {"server": {"tls_insecure": True}})
+        text = p.read_text(encoding="utf-8")
+        data = tomllib.loads(text)
+        assert data["server"]["tls_insecure"] is True
+        assert "true" in text
+
+    def test_bool_false_value(self, tmp_path):
+        p = tmp_path / "client.toml"
+        p.write_text("[server]\naddress = \"ws://x\"\n", encoding="utf-8")
+        update_client_toml(p, {"server": {"tls_insecure": False}})
+        text = p.read_text(encoding="utf-8")
+        data = tomllib.loads(text)
+        assert data["server"]["tls_insecure"] is False
+        assert "false" in text
+
+    def test_int_value_written_as_number(self, tmp_path):
+        p = tmp_path / "client.toml"
+        p.write_text("[mic.vad]\naggressiveness = 2\n", encoding="utf-8")
+        update_client_toml(p, {"mic.vad": {"aggressiveness": 3}})
+        text = p.read_text(encoding="utf-8")
+        data = tomllib.loads(text)
+        assert data["mic"]["vad"]["aggressiveness"] == 3
+        assert "aggressiveness = 3" in text
+
+    def test_float_value_written_as_number(self, tmp_path):
+        p = tmp_path / "client.toml"
+        p.write_text("[server]\naddress = \"ws://x\"\n", encoding="utf-8")
+        update_client_toml(p, {"server": {"reconnect_max_delay": 60.5}})
+        text = p.read_text(encoding="utf-8")
+        data = tomllib.loads(text)
+        assert data["server"]["reconnect_max_delay"] == pytest.approx(60.5)
+
+    def test_dotted_section_mic_vad_key_replace(self, tmp_path):
+        p = tmp_path / "client.toml"
+        p.write_text(
+            "[server]\naddress = \"ws://x\"\n\n"
+            "[mic.vad]\naggressiveness = 2\nmin_silence_ms = 500\n",
+            encoding="utf-8",
+        )
+        update_client_toml(p, {"mic.vad": {"aggressiveness": 1, "min_silence_ms": 300}})
+        text = p.read_text(encoding="utf-8")
+        data = tomllib.loads(text)
+        assert data["mic"]["vad"]["aggressiveness"] == 1
+        assert data["mic"]["vad"]["min_silence_ms"] == 300
+
+    def test_dotted_section_mic_preprocess_new_keys(self, tmp_path):
+        p = tmp_path / "client.toml"
+        p.write_text("[server]\naddress = \"ws://x\"\n", encoding="utf-8")
+        update_client_toml(p, {"mic.preprocess": {"gate": False, "gate_threshold": 100}})
+        text = p.read_text(encoding="utf-8")
+        data = tomllib.loads(text)
+        assert data["mic"]["preprocess"]["gate"] is False
+        assert data["mic"]["preprocess"]["gate_threshold"] == 100
+
+    def test_operator_precedence_fix_no_false_positive(self, tmp_path):
+        p = tmp_path / "client.toml"
+        p.write_text(
+            "[server]\naddress = \"ws://x\"\n\n"
+            "\n"
+            "[profile]\nactive_id = \"p1\"\n",
+            encoding="utf-8",
+        )
+        update_client_toml(p, {"profile": {"active_id": "p2"}})
+        text = p.read_text(encoding="utf-8")
+        data = tomllib.loads(text)
+        assert data["profile"]["active_id"] == "p2"
+        assert data["server"]["address"] == "ws://x"
+
+    def test_bool_before_int_not_1_or_0(self, tmp_path):
+        p = tmp_path / "client.toml"
+        p.write_text("[mic.preprocess]\ngate = true\n", encoding="utf-8")
+        update_client_toml(p, {"mic.preprocess": {"gate": False}})
+        text = p.read_text(encoding="utf-8")
+        assert "false" in text
+        data = tomllib.loads(text)
+        assert data["mic"]["preprocess"]["gate"] is False
+
+    def test_str_value_still_quoted(self, tmp_path):
+        p = tmp_path / "client.toml"
+        p.write_text("[server]\naddress = \"ws://x\"\n", encoding="utf-8")
+        update_client_toml(p, {"server": {"token": "my_secret"}})
+        text = p.read_text(encoding="utf-8")
+        assert '"my_secret"' in text
+        data = tomllib.loads(text)
+        assert data["server"]["token"] == "my_secret"

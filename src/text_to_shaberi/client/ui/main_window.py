@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPlainTextEdit,
     QPushButton,
+    QStatusBar,
     QVBoxLayout,
     QWidget,
 )
@@ -60,6 +61,9 @@ class MainWindow(QMainWindow):
 
         self.connection_label = QLabel("接続: --")
         layout.addWidget(self.connection_label)
+
+        self._status_label = QLabel("")
+        layout.addWidget(self._status_label)
 
         input_row = QHBoxLayout()
         self.text_input = QLineEdit()
@@ -129,6 +133,38 @@ class MainWindow(QMainWindow):
 
     def set_connection(self, text: str) -> None:
         self.connection_label.setText(f"接続: {text}")
+
+    def set_status(self, text: str) -> None:
+        self._status_label.setText(text)
+
+    def set_output_device(self, value) -> None:
+        if value == "default" or value == "" or value is None:
+            self.device_combo.setCurrentIndex(0)
+            return
+        if value == "__ttsvirt__":
+            idx = self.device_combo.findData("__ttsvirt__")
+            if idx >= 0:
+                self.device_combo.setCurrentIndex(idx)
+            return
+        try:
+            int_val = int(value)
+            idx = self.device_combo.findData(int_val)
+            if idx >= 0:
+                self.device_combo.setCurrentIndex(idx)
+                return
+        except (TypeError, ValueError):
+            pass
+        if not isinstance(value, str):
+            return  # int index で findData 不一致＝該当デバイス無し（名前マッチ不要）
+        for i in range(self.device_combo.count()):
+            data = self.device_combo.itemData(i)
+            if isinstance(data, str) and data == value:
+                self.device_combo.setCurrentIndex(i)
+                return
+            dev_name = self.device_combo.itemText(i)
+            if dev_name and value and value.lower() in dev_name.lower():
+                self.device_combo.setCurrentIndex(i)
+                return
 
     def _handle_send(self) -> None:
         text = self.text_input.text().strip()

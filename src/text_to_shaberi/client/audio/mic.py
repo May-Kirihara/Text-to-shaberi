@@ -70,10 +70,27 @@ class MicCapture:
         self._stream: Any = None
         self._thread: threading.Thread | None = None
         self._stop = False
+        self._paused = threading.Event()
+        self._reset_pending = threading.Event()
+        self._discard_tail = False
 
     @property
     def active(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused.is_set()
+
+    def pause(self) -> None:
+        if not self._paused.is_set():
+            self._paused.set()
+            self._reset_pending.set()
+            self._discard_tail = True
+
+    def resume(self) -> None:
+        self._paused.clear()
+        self._discard_tail = False
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -146,11 +163,17 @@ class MicCapture:
                     break
                 if overflowed:
                     self._log("[mic] 入力オーバーフロー")
+                if self._paused.is_set():
+                    if self._reset_pending.is_set():
+                        self._segmenter.reset()
+                        self._reset_pending.clear()
+                    continue
                 pcm = _to_int16_mono_bytes(data, self._channels)
                 for seg in self._segmenter.feed(pcm):
                     self._emit_segment(seg)
-            tail = self._segmenter.flush()
-            if tail:
-                self._emit_segment(tail)
+            if not self._discard_tail:
+                tail = self._segmenter.flush()
+                if tail:
+                    self._emit_segment(tail)
         except Exception:
             pass

@@ -28,6 +28,16 @@ def _load_output_devices() -> list:
         return []
 
 
+def _load_input_devices() -> list:
+    try:
+        from .audio.devices import list_input_devices
+
+        return list_input_devices()
+    except Exception as exc:
+        print(f"[warn] 入力デバイス列挙に失敗: {exc}", file=sys.stderr)
+        return []
+
+
 def run_check(config_path: str | Path) -> None:
     from ..common.opus_codec import opus_available
 
@@ -118,8 +128,12 @@ def run_gui(config_path: str | Path) -> None:
     asyncio.set_event_loop(loop)
 
     window = MainWindow(cfg, output_devices=_load_output_devices())
+    window.set_output_device(cfg.output.device)
 
     _profiles: list = []
+    mic_enabled_by_user = [False]
+    shutting_down = [False]
+    mic_reconfiguring = [False]
 
     ws = WSClient(
         cfg.server.address,
@@ -146,7 +160,8 @@ def run_gui(config_path: str | Path) -> None:
 
     def _on_state(event: str, payload: object = None) -> None:
         if event == "ready":
-            window.set_connection("\u2713")
+            codec_str = getattr(payload, "codec", None) or "?"
+            window.set_connection(f"\u2713 codec:{codec_str}")
             nonlocal _profiles
             _profiles = payload.profiles if payload else []
             has_auto_tts = payload.features.get("auto_tts") if payload else False
@@ -157,17 +172,42 @@ def run_gui(config_path: str | Path) -> None:
                 window.set_mic_enabled(True)
         elif event == "busy":
             window.set_busy(True)
+            if mic_holder[0] is not None and mic_holder[0].active and not shutting_down[0] and not mic_reconfiguring[0]:
+                mic_holder[0].pause()
         elif event == "idle":
             window.set_busy(False)
+            if (
+                mic_enabled_by_user[0]
+                and mic_holder[0] is not None
+                and mic_holder[0].active
+                and not shutting_down[0]
+                and not mic_reconfiguring[0]
+            ):
+                mic_holder[0].resume()
         elif event == "connected":
             window.log("[ws] connected")
         elif event == "disconnected":
             window.set_connection("\u2717")
             window.set_busy(False)
         elif event == "error":
+            window.set_status(f"\u26a0 {payload}")
             window.log(f"[error] {payload}")
         elif event == "reconnecting":
             window.set_connection(f"\u518d\u63a5\u7d9a\u4e2d\u2026({payload})")
+        elif event == "transcript":
+            window.log(f"\U0001f3a4\u2192 {payload}")
+        elif event == "metrics":
+            p = payload or {}
+            kind = p.get("kind", "?")
+            codec_val = p.get("codec") or "?"
+            parts = [f"codec:{codec_val}"]
+            stt = p.get("stt_ms")
+            if stt is not None:
+                parts.append(f"STT {stt/1000:.2f}s")
+            ttfa = p.get("ttfa_ms")
+            if ttfa is not None:
+                parts.append(f"TTFA {ttfa:.0f}ms")
+            window.set_status(" | ".join(parts))
 
     ws._on_state = _on_state
 
@@ -180,21 +220,63 @@ def run_gui(config_path: str | Path) -> None:
     def on_settings() -> None:
         from .ui.settings_dialog import SettingsDialog
 
-        dlg = SettingsDialog(window, cfg, _profiles)
+        dlg = SettingsDialog(
+            window, cfg, _profiles,
+            input_devices=_load_input_devices(),
+            output_devices=_load_output_devices(),
+        )
         if dlg.exec():
             vals = dlg.values()
-            update_client_toml(
-                config_path,
-                {
-                    "server": {"address": vals["address"], "token": vals["token"]},
-                    "profile": {"active_id": vals["active_id"]},
-                },
+            update_client_toml(config_path, vals)
+
+            server_vals = vals.get("server", {})
+            cfg.server.address = server_vals.get("address", cfg.server.address)
+            cfg.server.token = server_vals.get("token", cfg.server.token)
+            cfg.server.codec = server_vals.get("codec", cfg.server.codec)
+            cfg.server.tls_insecure = server_vals.get("tls_insecure", cfg.server.tls_insecure)
+            cfg.server.tls_cafile = server_vals.get("tls_cafile", cfg.server.tls_cafile)
+
+            profile_vals = vals.get("profile", {})
+            cfg.profile.active_id = profile_vals.get("active_id", cfg.profile.active_id)
+            ws._default_profile = cfg.profile.active_id
+
+            mic_vals = vals.get("mic", {})
+            cfg.mic.device = mic_vals.get("device", cfg.mic.device)
+
+            vad_vals = vals.get("mic.vad", {})
+            if vad_vals:
+                cfg.mic.vad.aggressiveness = vad_vals.get("aggressiveness", cfg.mic.vad.aggressiveness)
+                cfg.mic.vad.min_silence_ms = vad_vals.get("min_silence_ms", cfg.mic.vad.min_silence_ms)
+                cfg.mic.vad.speech_pad_ms = vad_vals.get("speech_pad_ms", cfg.mic.vad.speech_pad_ms)
+
+            preprocess_vals = vals.get("mic.preprocess", {})
+            if preprocess_vals:
+                cfg.mic.preprocess.gate = preprocess_vals.get("gate", cfg.mic.preprocess.gate)
+                cfg.mic.preprocess.gate_threshold = preprocess_vals.get(
+                    "gate_threshold", cfg.mic.preprocess.gate_threshold
+                )
+
+            output_vals = vals.get("output", {})
+            cfg.output.device = output_vals.get("device", cfg.output.device)
+
+            ws._apply_server_settings(
+                codec_pref=cfg.server.codec,
+                tls_insecure=cfg.server.tls_insecure,
+                tls_cafile=cfg.server.tls_cafile,
+                token=cfg.server.token,
             )
-            cfg.server.address = vals["address"]
-            cfg.server.token = vals["token"]
-            cfg.profile.active_id = vals["active_id"]
-            ws._default_profile = vals["active_id"]
-            asyncio.ensure_future(ws.reconnect(vals["address"], vals["token"]))
+            asyncio.ensure_future(ws.reconnect(cfg.server.address, cfg.server.token))
+
+            mic_reconfiguring[0] = True
+            if mic_holder[0] is not None:
+                try:
+                    mic_holder[0].stop()
+                except Exception:
+                    pass
+                mic_holder[0] = None
+            mic_reconfiguring[0] = False
+
+            window.set_output_device(cfg.output.device)
 
     _last_skip_log = [0.0]
 
@@ -208,6 +290,7 @@ def run_gui(config_path: str | Path) -> None:
         asyncio.ensure_future(ws.utter(seg, auto_tts=True))
 
     def on_mic_toggle(active: bool) -> None:
+        mic_enabled_by_user[0] = active
         if active:
             if mic_holder[0] is None:
                 from .audio.mic import MicCapture
@@ -248,6 +331,7 @@ def run_gui(config_path: str | Path) -> None:
     asyncio.ensure_future(_startup())
 
     async def _shutdown():
+        shutting_down[0] = True
         if mic_holder[0] is not None:
             await asyncio.to_thread(mic_holder[0].stop)
         await ws.close()

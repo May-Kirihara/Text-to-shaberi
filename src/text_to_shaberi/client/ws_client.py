@@ -106,6 +106,9 @@ class WSClient:
         self._reconnect_task: asyncio.Task | None = None
         self._reconnect_attempt: int = 0
 
+        self._metric_kind: str | None = None
+        self._last_stt_ms: float | None = None
+
     def _get_loop(self) -> asyncio.AbstractEventLoop:
         if self._loop is not None:
             return self._loop
@@ -157,6 +160,23 @@ class WSClient:
             and not self._recv_task.done()
             and self._ready is not None
         )
+
+    def _apply_server_settings(
+        self,
+        *,
+        codec_pref: str | None = None,
+        tls_insecure: bool | None = None,
+        tls_cafile: str | None = None,
+        token: str | None = None,
+    ) -> None:
+        if codec_pref is not None:
+            self._codec_pref = codec_pref
+        if tls_insecure is not None:
+            self._tls_insecure = tls_insecure
+        if tls_cafile is not None:
+            self._tls_cafile = tls_cafile
+        if token is not None:
+            self._token = token
 
     async def _safe_close_ws(self) -> None:
         if self._ws is not None:
@@ -285,6 +305,14 @@ class WSClient:
         self._first_chunk_logged = False
         self._cancelling = False
         self._state("busy")
+        self._metric_kind = "speak"
+        self._last_stt_ms = None
+        self._state("metrics", {
+            "kind": "speak",
+            "ttfa_ms": None,
+            "stt_ms": None,
+            "codec": self._ready.codec if self._ready else None,
+        })
 
         profile_val = profile or (self._default_profile or None)
 
@@ -324,6 +352,14 @@ class WSClient:
         self._first_chunk_logged = False
         self._t_send = loop.time()
         self._state("busy")
+        self._metric_kind = "utter"
+        self._last_stt_ms = None
+        self._state("metrics", {
+            "kind": "utter",
+            "ttfa_ms": None,
+            "stt_ms": None,
+            "codec": self._ready.codec if self._ready else None,
+        })
 
         fmt = AudioFormatPayload(
             codec="pcm_s16le",
@@ -447,6 +483,12 @@ class WSClient:
             if self._t_send is not None:
                 ttfa_ms = (loop.time() - self._t_send) * 1000
                 self._log(f"TTFA: {ttfa_ms:.0f} ms")
+                self._state("metrics", {
+                    "kind": self._metric_kind or "speak",
+                    "ttfa_ms": ttfa_ms,
+                    "stt_ms": self._last_stt_ms,
+                    "codec": self._ready.codec if self._ready else None,
+                })
 
     def _on_message(self, msg: Any) -> None:
         if isinstance(msg, Ready):
@@ -502,6 +544,16 @@ class WSClient:
                 text = msg.text
                 self._log(f"🎤→ {text}")
                 self._state("transcript", text)
+                if self._t_send is not None and self._metric_kind == "utter":
+                    loop = self._loop or asyncio.get_event_loop()
+                    stt_ms = (loop.time() - self._t_send) * 1000
+                    self._last_stt_ms = stt_ms
+                    self._state("metrics", {
+                        "kind": "utter",
+                        "ttfa_ms": None,
+                        "stt_ms": stt_ms,
+                        "codec": self._ready.codec if self._ready else None,
+                    })
                 if self._cancelling:
                     self._finish_stream()
                 elif not (self._stt_auto_tts and text.strip()):

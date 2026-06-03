@@ -31,7 +31,17 @@ def _toml_str(v: str) -> str:
     return '"' + "".join(result) + '"'
 
 
-def update_client_toml(path: str | Path, updates: dict[str, dict[str, str]]) -> None:
+def _toml_value(v) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        return repr(v)
+    return _toml_str(str(v))
+
+
+def update_client_toml(path: str | Path, updates: dict[str, dict[str, object]]) -> None:
     path = Path(path)
     if path.exists():
         lines = path.read_text(encoding="utf-8").splitlines(True)
@@ -62,7 +72,7 @@ def update_client_toml(path: str | Path, updates: dict[str, dict[str, str]]) -> 
         if current_section is not None and "=" in stripped:
             key_part = stripped.split("=", 1)[0].strip()
             if current_section in updates and key_part in updates[current_section]:
-                new_lines.append(f"{key_part} = {_toml_str(updates[current_section][key_part])}\n")
+                new_lines.append(f"{key_part} = {_toml_value(updates[current_section][key_part])}\n")
                 written_keys.add((current_section, key_part))
                 i += 1
                 continue
@@ -83,15 +93,15 @@ def update_client_toml(path: str | Path, updates: dict[str, dict[str, str]]) -> 
                     found = True
                     continue
                 if found and _SECTION_RE.match(stripped_j):
-                    new_lines.insert(j, f"{key} = {_toml_str(value)}\n")
+                    new_lines.insert(j, f"{key} = {_toml_value(value)}\n")
                     written_keys.add((section, key))
                     found = False
                     break
-                if found and stripped_j.startswith("#") or stripped_j == "":
+                if found and (stripped_j.startswith("#") or stripped_j == ""):
                     continue
             else:
                 if found:
-                    new_lines.append(f"{key} = {_toml_str(value)}\n")
+                    new_lines.append(f"{key} = {_toml_value(value)}\n")
                     written_keys.add((section, key))
                     continue
 
@@ -107,7 +117,7 @@ def update_client_toml(path: str | Path, updates: dict[str, dict[str, str]]) -> 
                     elif new_lines and new_lines[-1].strip() != "":
                         new_lines.append("\n")
                     new_lines.append(f"[{section}]\n")
-                    new_lines.append(f"{key} = {_toml_str(value)}\n")
+                    new_lines.append(f"{key} = {_toml_value(value)}\n")
                     written_keys.add((section, key))
 
     content = "".join(new_lines)
