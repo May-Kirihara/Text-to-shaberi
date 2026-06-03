@@ -18,7 +18,7 @@ class AudioDevice:
 
 
 def _sd():
-    import sounddevice as sd  # 遅延import（libportaudio2 が必要）
+    import sounddevice as sd
 
     return sd
 
@@ -51,8 +51,6 @@ def list_input_devices() -> list[AudioDevice]:
     return list_devices("input")
 
 
-# 「既定」選択時に優先する出力デバイス名（PipeWire/pulse はシステム既定sinkへ流れる）。
-# PortAudio の device=None は生hw（未接続アナログ等）を指すことがあり無音になりやすい。
 _PREFERRED_DEFAULT_NAMES = ("pipewire", "pulse", "default", "sysdefault")
 
 
@@ -84,7 +82,7 @@ def resolve_device(name_or_default: str | int | None, kind: str = "output") -> i
     if name_or_default in (None, "", "default"):
         return None
     try:
-        return int(name_or_default)  # index 指定
+        return int(name_or_default)
     except (TypeError, ValueError):
         pass
     needle = str(name_or_default).lower()

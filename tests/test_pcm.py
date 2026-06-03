@@ -6,7 +6,7 @@ import struct
 import numpy as np
 import pytest
 
-from text_to_shaberi.tts.client import (
+from text_to_shaberi.common.pcm import (
     _pcm_to_float32,
     bytes_per_sample,
     split_full_samples,

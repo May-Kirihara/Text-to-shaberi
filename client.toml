@@ -1,0 +1,32 @@
+# Text-to-shaberi クライアント設定
+# docs/IMPL-R0.md §3.7
+
+[server]
+address = "ws://127.0.0.1:8765/ws"
+token   = ""                     # 空=ローカルのみ。外部接続時はサーバと同じ token を設定
+
+[output]
+device   = "default"             # "default" | デバイス名の一部 | index
+resample = "auto"                # 出力デバイスrateへ soxr 変換
+
+[mic]
+device      = "default"
+sample_rate = 16000
+channels    = 1
+[mic.preprocess]
+gate    = true                   # 軽量ノイズゲート（MVP既定ON）
+denoise = "off"                  # off | rnnoise | noisereduce
+[mic.vad]
+engine         = "webrtc"        # webrtc | silero（R0では設定値のみ・importしない）
+min_silence_ms = 500
+speech_pad_ms  = 150
+
+[ui]
+# 日本語入力の方式
+#   ibus            = アプリだけ ibus+mozc（既定）
+#   virtualkeyboard = PySide6同梱の画面キーボード
+#   system          = 環境変数を継承
+input_method = "ibus"
+
+[profile]
+active_id = ""                   # TTS プロファイル ID。空=サーバ既定

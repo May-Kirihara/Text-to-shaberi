@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import re
 import tomllib
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from ...common.audio_format import AudioFormat
 
 _PLACEHOLDER = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 
@@ -30,30 +31,43 @@ def render_value(value: Any, variables: dict[str, Any]) -> Any:
     return value
 
 
-@dataclass(slots=True)
-class AudioFormat:
-    encoding: str = "pcm_s16le"
-    sample_rate: int = 32000
-    channels: int = 1
-
-
-@dataclass(slots=True)
 class TTSProfile:
-    name: str
-    driver: str
-    method: str
-    url: str
-    body_type: str
-    timeout_sec: float
-    headers: dict[str, str]
-    body: dict[str, Any]
-    response_mode: str
-    response_content_type: str
-    audio: AudioFormat
-    path: Path | None = None
+    __slots__ = (
+        "name", "driver", "method", "url", "body_type", "timeout_sec",
+        "headers", "body", "response_mode", "response_content_type", "audio", "path",
+    )
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        driver: str,
+        method: str,
+        url: str,
+        body_type: str,
+        timeout_sec: float,
+        headers: dict[str, str],
+        body: dict[str, Any],
+        response_mode: str,
+        response_content_type: str,
+        audio: AudioFormat,
+        path: Path | None = None,
+    ) -> None:
+        self.name = name
+        self.driver = driver
+        self.method = method
+        self.url = url
+        self.body_type = body_type
+        self.timeout_sec = timeout_sec
+        self.headers = headers
+        self.body = body
+        self.response_mode = response_mode
+        self.response_content_type = response_content_type
+        self.audio = audio
+        self.path = path
 
     @classmethod
-    def load(cls, path: str | Path) -> "TTSProfile":
+    def load(cls, path: str | Path) -> TTSProfile:
         path = Path(path)
         with path.open("rb") as f:
             raw = tomllib.load(f)

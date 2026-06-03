@@ -11,7 +11,7 @@ import time
 
 import numpy as np
 
-from ..tts.client import _pcm_to_float32, bytes_per_sample, split_full_samples
+from ...common.pcm import _pcm_to_float32, bytes_per_sample, split_full_samples
 
 logger = logging.getLogger(__name__)
 

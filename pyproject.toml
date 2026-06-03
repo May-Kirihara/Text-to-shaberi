@@ -8,21 +8,35 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.136.3",
-    "httpx>=0.28.1",
     "numpy>=2.4.4",
-    "pyside6>=6.11.1",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+client = [
+    "PySide6>=6.11.1",
     "qasync>=0.28.0",
-    "qwen-asr>=0.0.6",
-    "silero-vad>=6.2.1",
     "sounddevice>=0.5.5",
     "soxr>=1.1.0",
+    "numpy>=2.4.4",
+    "websockets>=12.0",
+    "webrtcvad>=2.0.10",
+]
+server = [
     "torch>=2.11.0",
+    "qwen-asr>=0.0.6",
+    "fastapi>=0.136.3",
     "uvicorn>=0.48.0",
+    "websockets>=12.0",
+    "httpx>=0.28.1",
+    "numpy>=2.4.4",
+    "soxr>=1.1.0",
 ]
 
 [project.scripts]
-text-to-shaberi = "text_to_shaberi:main"
+text-to-shaberi-client = "text_to_shaberi.client.app:main"
+text-to-shaberi-server = "text_to_shaberi.server.app:main"
+text-to-shaberi = "text_to_shaberi.client.app:main"
 
 [[tool.uv.index]]
 url = "https://download.pytorch.org/whl/cu128"

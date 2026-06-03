@@ -10,60 +10,14 @@ import base64
 import io
 import wave
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from typing import Any
 
 import httpx
 import numpy as np
 
-from .profile import AudioFormat, TTSProfile
-
-
-def bytes_per_sample(encoding: str) -> int:
-    """PCM encoding 名 → 1サンプルあたりのバイト数。"""
-    match encoding:
-        case "pcm_s16le":
-            return 2
-        case "pcm_s32le" | "pcm_f32le":
-            return 4
-    raise ValueError(f"unsupported encoding: {encoding}")
-
-
-def split_full_samples(buf: bytes, frame_bytes: int) -> tuple[bytes, bytes]:
-    """buf を完全フレーム境界で分割 → (完全フレーム分, 端数carry)。"""
-    if frame_bytes <= 0:
-        raise ValueError(f"frame_bytes must be positive: {frame_bytes}")
-    remainder = len(buf) % frame_bytes
-    if remainder == 0:
-        return buf, b""
-    cut = len(buf) - remainder
-    return buf[:cut], buf[cut:]
-
-
-def _pcm_to_float32(data: bytes, encoding: str, channels: int) -> np.ndarray:
-    """生 PCM bytes → float32 ndarray（mono=1D, 多ch=2D）。"""
-    match encoding:
-        case "pcm_s16le":
-            arr = np.frombuffer(data, dtype="<i2").astype(np.float32) / 32768.0
-        case "pcm_s32le":
-            arr = np.frombuffer(data, dtype="<i4").astype(np.float32) / 2147483648.0
-        case "pcm_f32le":
-            arr = np.frombuffer(data, dtype="<f4").astype(np.float32)
-        case _:
-            raise ValueError(f"unsupported encoding: {encoding}")
-    if channels > 1:
-        return arr.reshape(-1, channels)
-    return arr
-
-
-@dataclass(slots=True)
-class AudioBuffer:
-    samples: np.ndarray  # mono=1D(n,), 多ch=2D(frames,channels), float32 [-1,1]
-    sample_rate: int
-
-    @property
-    def duration(self) -> float:
-        return len(self.samples) / self.sample_rate if self.sample_rate else 0.0
+from ...common.audio_format import AudioFormat
+from ...common.pcm import AudioBuffer, _pcm_to_float32
+from .profile import TTSProfile
 
 
 def _decode_raw(data: bytes, fmt: AudioFormat) -> AudioBuffer:
@@ -109,7 +63,6 @@ class TTSClient:
         elif profile.body_type == "json":
             kwargs["json"] = body
         elif profile.body_type in ("form", "multipart"):
-            # multipartのファイル送信はM2では未対応
             kwargs["data"] = body
         else:
             kwargs["json"] = body
@@ -159,7 +112,6 @@ class TTSClient:
 
 def _extract(payload: dict, profile: TTSProfile) -> str:
     """response.extract.path（ドット区切り）で JSON からフィールドを取り出す（json系用）。"""
-    # M1ではプロファイルにextract定義が無いので素朴に "audio" を探す。M6で schema 化。
     if "audio" in payload:
         return payload["audio"]
     raise ValueError("json_base64 のフィールド抽出に失敗（extract.path 未対応）")

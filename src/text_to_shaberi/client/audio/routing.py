@@ -22,7 +22,6 @@ def move_app_to_sink(sink_name: str, app_name: str, pid: int) -> int | None:
         logger.warning("[route] pactl が見つかりません → ルーティング不可")
         return None
 
-    # sink 存在確認
     try:
         result = subprocess.run(
             ["pactl", "list", "short", "sinks"],
@@ -37,7 +36,6 @@ def move_app_to_sink(sink_name: str, app_name: str, pid: int) -> int | None:
         logger.warning("[route] sink一覧取得失敗: %s", exc)
         return None
 
-    # sink-input 一覧から自プロセスを特定
     try:
         result = subprocess.run(
             ["pactl", "list", "sink-inputs"],
@@ -56,7 +54,6 @@ def move_app_to_sink(sink_name: str, app_name: str, pid: int) -> int | None:
     for line in result.stdout.splitlines():
         m = re.match(r"^Sink Input #(\d+)", line)
         if m:
-            # 前のブロックを評価
             _check_candidate(current_id, current_props, app_name, pid, candidates)
             current_id = int(m.group(1))
             current_props = {}
@@ -68,7 +65,6 @@ def move_app_to_sink(sink_name: str, app_name: str, pid: int) -> int | None:
                 val = key_val[1].strip().strip('"')
                 current_props[key] = val
 
-    # 最後のブロックを評価
     _check_candidate(current_id, current_props, app_name, pid, candidates)
 
     if not candidates:
@@ -79,7 +75,6 @@ def move_app_to_sink(sink_name: str, app_name: str, pid: int) -> int | None:
     if len(candidates) > 1:
         logger.info("[route] 候補%d件 → 最新 #%d を採用", len(candidates), target_id)
 
-    # 移動実行
     try:
         subprocess.run(
             ["pactl", "move-sink-input", str(target_id), sink_name],

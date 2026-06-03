@@ -1,0 +1,23 @@
+# Text-to-shaberi サーバ設定
+# docs/IMPL-R0.md §3.5
+
+[bind]
+host  = "127.0.0.1"              # 外部公開時は 0.0.0.0 + token 必須
+port  = 8765
+token = ""                       # 外部bind時は必須（空なら起動拒否）
+
+[stt]
+backend  = "qwen_local"          # qwen_local | qwen_dashscope
+language = "ja"
+[stt.qwen_local]
+model               = "Qwen/Qwen3-ASR-1.7B"
+device              = "cuda:0"
+dtype               = "bfloat16"
+attn_implementation = "sdpa"     # flash-attn導入済みなら "flash_attention_2"
+
+[tts]
+profiles_dir    = ""             # 空=repo直下 profiles/ を使用
+active_profile  = "gpt-sovits"   # profiles/tts/<name>.toml
+
+[transport]
+codec = "pcm"                    # pcm（X1で opus 追加）

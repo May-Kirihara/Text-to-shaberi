@@ -1,6 +1,7 @@
 """メインウィンドウ（M2: テキスト入力・送信・停止・出力デバイス切替・ログ表示）。
 
-M2 で停止ボタン、set_busy（同時発話防止）、TTS_Virtual（配信用）項目を追加。
+R0: MainWindow は ClientConfig のみで生成（旧 config.active_tts_profile/config.stt.backend は参照しない）。
+初期ログは server.address と profile.active_id を表示。
 """
 from __future__ import annotations
 
@@ -32,7 +33,6 @@ class MainWindow(QMainWindow):
         central = QWidget()
         layout = QVBoxLayout(central)
 
-        # 出力デバイス選択（既定 / TTS_Virtual / 各デバイス）
         device_row = QHBoxLayout()
         device_row.addWidget(QLabel("出力先:"))
         self.device_combo = QComboBox()
@@ -43,7 +43,6 @@ class MainWindow(QMainWindow):
         device_row.addWidget(self.device_combo, 1)
         layout.addLayout(device_row)
 
-        # テキスト入力 + 送信 + 停止
         input_row = QHBoxLayout()
         self.text_input = QLineEdit()
         self.text_input.setPlaceholderText("読み上げるテキストを入力…")
@@ -55,7 +54,6 @@ class MainWindow(QMainWindow):
         input_row.addWidget(self.stop_button)
         layout.addLayout(input_row)
 
-        # ログ
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         layout.addWidget(self.log_view, 1)
@@ -66,7 +64,11 @@ class MainWindow(QMainWindow):
         self.text_input.returnPressed.connect(self._handle_send)
         self.stop_button.clicked.connect(self._handle_stop)
 
-        self.log(f"profile = {config.active_tts_profile} / stt = {config.stt.backend}")
+        server_addr = getattr(config, "server", None)
+        addr_str = getattr(server_addr, "address", "N/A") if server_addr else "N/A"
+        profile_cfg = getattr(config, "profile", None)
+        active_id = getattr(profile_cfg, "active_id", "") if profile_cfg else ""
+        self.log(f"server = {addr_str} / profile = {active_id or '(server default)'}")
 
     def set_on_speak(self, callback: Callable[[str], None]) -> None:
         self._on_speak = callback
