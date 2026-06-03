@@ -1,4 +1,4 @@
-"""音声I/O 層：デバイス列挙と再生。"""
+"""音声I/O 層：デバイス列挙、再生、ルーティング。"""
 from .devices import (
     AudioDevice,
     list_input_devices,
@@ -6,7 +6,7 @@ from .devices import (
     preferred_default_output,
     resolve_device,
 )
-from .player import play, stop
+from .player import StreamingPlayer, play, stop
 
 __all__ = [
     "AudioDevice",
@@ -16,4 +16,5 @@ __all__ = [
     "resolve_device",
     "play",
     "stop",
+    "StreamingPlayer",
 ]

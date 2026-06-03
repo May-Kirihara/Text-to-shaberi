@@ -1,4 +1,4 @@
-"""エントリポイント（M0: PySide6 + qasync の足場）。
+"""エントリポイント（M2: ストリーミング再生＋音声I/O）。
 
 - `text-to-shaberi`            … GUI 起動
 - `text-to-shaberi --check`    … GUIを起動せず設定/プロファイル/デバイスのロードを検査
@@ -78,9 +78,8 @@ def _setup_input_method(cfg: AppConfig) -> None:
     try:
         running = subprocess.run(["pgrep", "-x", "ibus-daemon"], capture_output=True).returncode == 0
         if not running:
-            # -d=daemonize, -r=replace。-x(XIM)は付けない＝fcitx5のXIMと干渉させない
             subprocess.Popen([ibus_daemon, "-dr"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            for _ in range(12):  # デーモン起動を最大~1.8s待つ
+            for _ in range(12):
                 time.sleep(0.15)
                 if subprocess.run(["pgrep", "-x", "ibus-daemon"], capture_output=True).returncode == 0:
                     break
@@ -104,14 +103,21 @@ def run_gui(config_path: str | Path) -> None:
     import qasync
     from PySide6.QtWidgets import QApplication
 
-    from .audio.player import play as play_audio
+    from .audio.player import StreamingPlayer, play as play_audio
+    from .audio.routing import move_app_to_sink
     from .tts.client import TTSClient
     from .ui.main_window import MainWindow
 
     cfg = load_config(config_path)
     profile = load_profile(cfg.profiles_dir, cfg.active_tts_profile)
 
-    _setup_input_method(cfg)  # QApplication 生成前に IME を準備
+    # PulseAudio クライアント名固定（QApplication 生成前・sounddevice import 前）
+    os.environ.setdefault(
+        "PULSE_PROP",
+        f"application.name=text-to-shaberi media.role=production",
+    )
+
+    _setup_input_method(cfg)
 
     app = QApplication(sys.argv)
     loop = qasync.QEventLoop(app)
@@ -120,20 +126,83 @@ def run_gui(config_path: str | Path) -> None:
     client = TTSClient()
     window = MainWindow(cfg, output_devices=_load_output_devices())
 
-    async def speak(text: str) -> None:
-        """送信テキスト → TTS合成 → 再生（M1: 同期再生）。"""
-        try:
-            t0 = loop.time()
-            buf = await client.synthesize(profile, text)
-            window.log(f"[tts] {buf.duration:.1f}s 音声を {loop.time() - t0:.2f}s で取得 → 再生")
-            device = window.selected_output_device()
-            await loop.run_in_executor(None, play_audio, buf.samples, buf.sample_rate, device)
-        except Exception as exc:  # noqa: BLE001 - UIに見せて継続
-            window.log(f"[error] {exc!r}")
+    current_task: list[asyncio.Task | None] = [None]
+    current_player: list[StreamingPlayer | None] = [None]
 
-    window.set_on_speak(lambda text: asyncio.ensure_future(speak(text)))
-    # アプリ終了時に httpx クライアントを閉じる（loop稼働中に実行）
-    app.aboutToQuit.connect(lambda: asyncio.ensure_future(client.aclose()))
+    async def speak(text: str) -> None:
+        device = window.selected_output_device()
+        use_virtual = device == "__ttsvirt__"
+        play_device = None if use_virtual else device
+        window.set_busy(True)
+        player: StreamingPlayer | None = None
+        try:
+            current_task[0] = asyncio.current_task()
+            if profile.response_mode == "audio_stream":
+                player = await loop.run_in_executor(
+                    None,
+                    lambda: StreamingPlayer(
+                        profile.audio.sample_rate,
+                        profile.audio.channels,
+                        play_device,
+                        profile.audio.encoding,
+                    ),
+                )
+                current_player[0] = player
+                if use_virtual:
+                    moved = await loop.run_in_executor(
+                        None,
+                        lambda: move_app_to_sink("ttsvirt", "text-to-shaberi", os.getpid()),
+                    )
+                    window.log(f"[route] TTS_Virtual move: {moved}")
+                t0 = loop.time()
+                first_chunk: float | None = None
+                async for chunk in client.stream(profile, text):
+                    if first_chunk is None:
+                        first_chunk = loop.time() - t0
+                        window.log(f"[tts] first-chunk {first_chunk * 1000:.0f}ms")
+                    await loop.run_in_executor(None, player.write_bytes, chunk)
+                await loop.run_in_executor(None, player.close)
+                window.log(f"[tts] 再生完了 {loop.time() - t0:.2f}s")
+            else:
+                t0 = loop.time()
+                buf = await client.synthesize(profile, text)
+                window.log(f"[tts] {buf.duration:.1f}s 音声を {loop.time() - t0:.2f}s で取得 → 再生")
+                await loop.run_in_executor(None, play_audio, buf.samples, buf.sample_rate, play_device)
+        except asyncio.CancelledError:
+            if player is not None:
+                await loop.run_in_executor(None, player.abort)
+            window.log("[tts] 停止しました")
+        except Exception as exc:
+            if player is not None:
+                await loop.run_in_executor(None, player.abort)
+            window.log(f"[error] {exc!r}")
+        finally:
+            current_task[0] = None
+            current_player[0] = None
+            window.set_busy(False)
+
+    def on_speak(text: str) -> None:
+        if current_task[0] is not None:
+            return
+        asyncio.ensure_future(speak(text))
+
+    def on_stop() -> None:
+        if current_player[0] is not None:
+            loop.run_in_executor(None, current_player[0].abort)
+        if current_task[0] is not None:
+            current_task[0].cancel()
+
+    window.set_on_speak(on_speak)
+    window.set_on_stop(on_stop)
+
+    def on_about_to_quit() -> None:
+        if current_task[0] is not None:
+            current_task[0].cancel()
+        if current_player[0] is not None:
+            current_player[0].abort()
+        asyncio.ensure_future(client.aclose())
+
+    app.aboutToQuit.connect(on_about_to_quit)
     window.show()
 
     with loop:

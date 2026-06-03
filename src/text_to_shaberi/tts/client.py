@@ -1,14 +1,15 @@
-"""toml駆動の汎用HTTP TTSドライバ（M1: 同期取得）。
+"""toml駆動の汎用HTTP TTSドライバ（M2: 同期取得＋ストリーミング受信）。
 
 プロファイルの request 仕様で TTS-API を叩き、response.mode と audio フォーマットに
 従って音声を numpy float32 [-1,1] へデコードする。M1 はレスポンス全体を受け取ってから
-返す（チャンク逐次再生は M2）。
+返す。M2 でチャンク逐次受信（stream）を追加し、TTFA を短縮する。
 """
 from __future__ import annotations
 
 import base64
 import io
 import wave
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,22 +18,47 @@ import numpy as np
 
 from .profile import AudioFormat, TTSProfile
 
-# encoding 名 → numpy dtype（raw/PCM 用）
-_PCM_DTYPE: dict[str, str] = {
-    "pcm_s16le": "<i2",
-    "pcm_s24le": "<i4",  # 近似（24bitは後続で厳密対応）
-    "pcm_s32le": "<i4",
-    "pcm_f32le": "<f4",
-}
-_PCM_FULLSCALE: dict[str, float] = {
-    "<i2": 32768.0,
-    "<i4": 2147483648.0,
-}
+
+def bytes_per_sample(encoding: str) -> int:
+    """PCM encoding 名 → 1サンプルあたりのバイト数。"""
+    match encoding:
+        case "pcm_s16le":
+            return 2
+        case "pcm_s32le" | "pcm_f32le":
+            return 4
+    raise ValueError(f"unsupported encoding: {encoding}")
+
+
+def split_full_samples(buf: bytes, frame_bytes: int) -> tuple[bytes, bytes]:
+    """buf を完全フレーム境界で分割 → (完全フレーム分, 端数carry)。"""
+    if frame_bytes <= 0:
+        raise ValueError(f"frame_bytes must be positive: {frame_bytes}")
+    remainder = len(buf) % frame_bytes
+    if remainder == 0:
+        return buf, b""
+    cut = len(buf) - remainder
+    return buf[:cut], buf[cut:]
+
+
+def _pcm_to_float32(data: bytes, encoding: str, channels: int) -> np.ndarray:
+    """生 PCM bytes → float32 ndarray（mono=1D, 多ch=2D）。"""
+    match encoding:
+        case "pcm_s16le":
+            arr = np.frombuffer(data, dtype="<i2").astype(np.float32) / 32768.0
+        case "pcm_s32le":
+            arr = np.frombuffer(data, dtype="<i4").astype(np.float32) / 2147483648.0
+        case "pcm_f32le":
+            arr = np.frombuffer(data, dtype="<f4").astype(np.float32)
+        case _:
+            raise ValueError(f"unsupported encoding: {encoding}")
+    if channels > 1:
+        return arr.reshape(-1, channels)
+    return arr
 
 
 @dataclass(slots=True)
 class AudioBuffer:
-    samples: np.ndarray  # shape (frames, channels), float32 [-1,1]
+    samples: np.ndarray  # mono=1D(n,), 多ch=2D(frames,channels), float32 [-1,1]
     sample_rate: int
 
     @property
@@ -41,14 +67,7 @@ class AudioBuffer:
 
 
 def _decode_raw(data: bytes, fmt: AudioFormat) -> AudioBuffer:
-    dtype = _PCM_DTYPE.get(fmt.encoding, "<i2")
-    arr = np.frombuffer(data, dtype=dtype)
-    if dtype.endswith("f4"):
-        samples = arr.astype(np.float32)
-    else:
-        samples = arr.astype(np.float32) / _PCM_FULLSCALE.get(dtype, 32768.0)
-    if fmt.channels > 1:
-        samples = samples.reshape(-1, fmt.channels)
+    samples = _pcm_to_float32(data, fmt.encoding, fmt.channels)
     return AudioBuffer(samples=samples, sample_rate=fmt.sample_rate)
 
 
@@ -80,17 +99,21 @@ class TTSClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    def _build_request(self, profile: TTSProfile, body: dict[str, Any]) -> httpx.Request:
+    def _build_request_kwargs(
+        self, profile: TTSProfile, body: dict[str, Any]
+    ) -> tuple[str, str, dict[str, Any]]:
+        """(method, url, kwargs) を返す。body種別に応じて params/json/data を切替。"""
         kwargs: dict[str, Any] = {"headers": profile.headers, "timeout": profile.timeout_sec}
         if profile.method.upper() == "GET":
             kwargs["params"] = body
         elif profile.body_type == "json":
             kwargs["json"] = body
         elif profile.body_type in ("form", "multipart"):
+            # multipartのファイル送信はM2では未対応
             kwargs["data"] = body
-        else:  # raw_template 等は将来対応
+        else:
             kwargs["json"] = body
-        return self._client.build_request(profile.method, profile.url, **kwargs)
+        return profile.method, profile.url, kwargs
 
     def _decode(self, profile: TTSProfile, resp: httpx.Response) -> AudioBuffer:
         data = resp.content
@@ -112,10 +135,26 @@ class TTSClient:
 
     async def synthesize(self, profile: TTSProfile, text: str, **variables: Any) -> AudioBuffer:
         body = profile.render_body(text, **variables)
-        request = self._build_request(profile, body)
-        resp = await self._client.send(request)
+        method, url, kwargs = self._build_request_kwargs(profile, body)
+        resp = await self._client.request(method, url, **kwargs)
         resp.raise_for_status()
         return self._decode(profile, resp)
+
+    async def stream(
+        self, profile: TTSProfile, text: str, **variables: Any
+    ) -> AsyncIterator[bytes]:
+        """プロファイルに従い HTTP ストリーミング受信 → バイトチャンクを逐次 yield。
+
+        呼び出し側は ``profile.response_mode == "audio_stream"`` を判定してから使うこと。
+        Task.cancel() 時は async with が HTTP 接続を確実に閉じる。
+        """
+        body = profile.render_body(text, **variables)
+        method, url, kwargs = self._build_request_kwargs(profile, body)
+        async with self._client.stream(method, url, **kwargs) as resp:
+            resp.raise_for_status()
+            async for chunk in resp.aiter_bytes():
+                if chunk:
+                    yield chunk
 
 
 def _extract(payload: dict, profile: TTSProfile) -> str:

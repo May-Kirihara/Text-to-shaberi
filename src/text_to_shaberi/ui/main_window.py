@@ -1,7 +1,6 @@
-"""メインウィンドウ（M0: 足場）。
+"""メインウィンドウ（M2: テキスト入力・送信・停止・出力デバイス切替・ログ表示）。
 
-テキスト入力・送信・出力デバイス選択・ログ表示の最小UI。
-実際のTTSパイプライン接続は M1 以降で `on_speak` に結線する。
+M2 で停止ボタン、set_busy（同時発話防止）、TTS_Virtual（配信用）項目を追加。
 """
 from __future__ import annotations
 
@@ -25,6 +24,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = config
         self._on_speak = on_speak
+        self._on_stop: Callable[[], None] | None = None
 
         self.setWindowTitle("Text-to-shaberi")
         self.resize(680, 460)
@@ -32,23 +32,27 @@ class MainWindow(QMainWindow):
         central = QWidget()
         layout = QVBoxLayout(central)
 
-        # 出力デバイス選択（既定 / 仮想オーディオ等）
+        # 出力デバイス選択（既定 / TTS_Virtual / 各デバイス）
         device_row = QHBoxLayout()
         device_row.addWidget(QLabel("出力先:"))
         self.device_combo = QComboBox()
         self.device_combo.addItem("既定デバイス（システム既定sink）", None)
+        self.device_combo.addItem("TTS_Virtual（配信用）", "__ttsvirt__")
         for dev in output_devices or []:
             self.device_combo.addItem(f"{dev.name}", dev.index)
         device_row.addWidget(self.device_combo, 1)
         layout.addLayout(device_row)
 
-        # テキスト入力 + 送信
+        # テキスト入力 + 送信 + 停止
         input_row = QHBoxLayout()
         self.text_input = QLineEdit()
         self.text_input.setPlaceholderText("読み上げるテキストを入力…")
         self.send_button = QPushButton("送信")
+        self.stop_button = QPushButton("停止")
+        self.stop_button.setEnabled(False)
         input_row.addWidget(self.text_input, 1)
         input_row.addWidget(self.send_button)
+        input_row.addWidget(self.stop_button)
         layout.addLayout(input_row)
 
         # ログ
@@ -60,14 +64,24 @@ class MainWindow(QMainWindow):
 
         self.send_button.clicked.connect(self._handle_send)
         self.text_input.returnPressed.connect(self._handle_send)
+        self.stop_button.clicked.connect(self._handle_stop)
 
         self.log(f"profile = {config.active_tts_profile} / stt = {config.stt.backend}")
 
     def set_on_speak(self, callback: Callable[[str], None]) -> None:
         self._on_speak = callback
 
-    def selected_output_device(self) -> int | None:
+    def set_on_stop(self, callback: Callable[[], None]) -> None:
+        self._on_stop = callback
+
+    def selected_output_device(self) -> int | None | str:
         return self.device_combo.currentData()
+
+    def set_busy(self, busy: bool) -> None:
+        """送信中UIの有効/無効を切替（同時発話防止）。"""
+        self.text_input.setEnabled(not busy)
+        self.send_button.setEnabled(not busy)
+        self.stop_button.setEnabled(busy)
 
     def _handle_send(self) -> None:
         text = self.text_input.text().strip()
@@ -77,6 +91,10 @@ class MainWindow(QMainWindow):
         self.log(f"[gui] {text}")
         if self._on_speak is not None:
             self._on_speak(text)
+
+    def _handle_stop(self) -> None:
+        if self._on_stop is not None:
+            self._on_stop()
 
     def log(self, message: str) -> None:
         self.log_view.appendPlainText(message)
