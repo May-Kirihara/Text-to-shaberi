@@ -223,3 +223,6 @@ __marimo__/
 
 # Claude Code ランタイム生成物
 .claude/
+
+client.toml
+server.toml
