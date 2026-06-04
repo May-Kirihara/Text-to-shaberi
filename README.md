@@ -12,6 +12,8 @@ GPU を載せた Linux サーバ（STT＋TTS）と、手元の Windows／Linux �
 
 - 🎤 **常時マイク＋VAD**: webrtcvad による無音区切り＋軽量ノイズゲート。発話単位で自動送信。
 - 🗣 **STT → 自動 TTS 連鎖**: Qwen3-ASR で認識 → そのまま GPT-SoVITS で合成・再生（`auto_tts`）。
+- ⏩ **ストリーミングモード（喋りながら順次TTS）**: 句の切れ目で先行 STT → 順次合成 → **1本の連続音声**で返す。発話単位モードとはメイン画面のトグルで切替（サーバ対応時）。→ [`docs/STREAMING.md`](docs/STREAMING.md)
+- 🤖 **ローカル入力口（AITuber/LLM連携）**: `[input]` を有効化すると `ws://127.0.0.1:<port>` でテキストを受信し、文単位で先行合成 → 連続音声で配信へ。用途別の使い方は [`docs/USECASES.md`](docs/USECASES.md)。
 - ⌨ **テキスト読み上げ**: GUI のテキスト入力／LLM 等からの送信を想定。
 - 🔌 **任意の TTS-API に対応**: リクエストボディを **TOML プロファイル**で定義（TTS ごとに差し替え）。
 - 🎧 **低遅延ストリーミング再生**: 先頭チャンクから逐次再生（先頭欠けなし）。出力先は既定デバイス／仮想シンク（配信用）を選択。
@@ -147,6 +149,7 @@ docker compose logs -f orchestrator    # [opus] available: True / Uvicorn runnin
 
 - **テキスト読み上げ**: 入力欄に文字を入れて「送信」。「停止」で即中断。
 - **マイク**: 「🎤」トグルを ON にすると常時録音開始。話して黙ると自動で区切られ、`🎤→ 認識文` がログに出て、TTS 音声が再生されます（再生中はマイクが一時停止しフィードバックを防止）。
+- **モード切替**: メイン画面のトグルで「発話単位」⇄「ストリーミング（喋りながら順次TTS）」を切替（サーバが対応している時のみ有効）。詳細・チューニングは [`docs/STREAMING.md`](docs/STREAMING.md)。
 - **出力先**: 「既定デバイス」／「TTS_Virtual（配信用）」／列挙された各デバイスを選択。
 - **⚙ 設定**: サーバ（アドレス／トークン／コーデック／TLS）・マイク（デバイス／VAD／ゲート）・出力デバイスを編集し `client.toml` に保存（サーバ系変更は自動再接続）。
 - 下部ステータス行に `接続 ✓ codec:opus | STT 1.20s | TTFA 130ms` を表示。
@@ -176,11 +179,13 @@ docker compose logs -f orchestrator    # [opus] available: True / Uvicorn runnin
 | | `tls_insecure` / `tls_cafile` | 自己署名証明書の検証無効（LAN 用）／カスタム CA パス。 |
 | | `reconnect` / `reconnect_max_delay` | 自動再接続（既定 on）とバックオフ上限秒。 |
 | `[output]` | `device` | `default` / デバイス名の一部 / index。 |
-| `[mic]` | `device` / `sample_rate` / `channels` | 取込（既定 16000Hz mono）。 |
+| `[mic]` | `device` / `sample_rate` / `channels` / `stream_mode` | 取込（既定 16000Hz mono）。`stream_mode=true` で既定ストリーミング。 |
 | `[mic.preprocess]` | `gate` / `gate_threshold` | ノイズゲート（判定の床）。 |
-| `[mic.vad]` | `aggressiveness` / `min_silence_ms` / `speech_pad_ms` / `frame_ms` / `min_speech_ms` / `max_speech_ms` | webrtcvad の発話区切りパラメタ。`frame_ms`∈{10,20,30}・`sample_rate`∈{8/16/32/48k}。 |
+| `[mic.vad]` | `aggressiveness` / `min_silence_ms` / `speech_pad_ms` / `frame_ms` / `min_speech_ms` / `max_speech_ms` | webrtcvad の発話区切りパラメタ（発話単位モード）。`frame_ms`∈{10,20,30}・`sample_rate`∈{8/16/32/48k}。 |
+| | `seg_silence_ms` / `end_silence_ms` / `seg_min_ms` / `seg_max_ms` | ストリーミングモードの句区切り／終端／seg 長。意味・チューニングは [`docs/STREAMING.md`](docs/STREAMING.md)。 |
 | `[ui]` | `input_method` | `ibus`（既定）/`virtualkeyboard`/`system`。 |
 | `[profile]` | `active_id` | 使用する TTS プロファイル ID（空＝サーバ既定）。 |
+| `[input]` | `enabled` / `host` / `port` / `token` / `seg_max_chars` / `seg_hard_max_chars` | ローカルWSテキスト入力口（AITuber/LLM連携・既定無効）。意味と契約は [`docs/USECASES.md`](docs/USECASES.md)。 |
 
 ### TTS プロファイル（`profiles/tts/*.toml`）
 

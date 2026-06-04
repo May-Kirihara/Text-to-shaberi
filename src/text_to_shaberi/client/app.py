@@ -112,6 +112,9 @@ def run_gui(config_path: str | Path) -> None:
     from .ui.main_window import MainWindow
     from .ws_client import WSClient
     from .stream_bridge import StreamBridge
+    from .text_stream_bridge import TextStreamBridge
+    from .text_input import LocalInputServer, TextSegmenter
+    from .audio.vad import StreamStart
     from .settings_store import update_client_toml
 
     cfg = load_client_config(config_path)
@@ -164,6 +167,68 @@ def run_gui(config_path: str | Path) -> None:
     stream_supported = [False]
     stream_bridge = StreamBridge(ws, on_log=window.log, loop=loop)
 
+    text_supported = [False]
+    text_segmenter = None
+    text_stream_bridge = None
+    local_input_server = None
+    _local_server_holder: list = [None]
+
+    if cfg.input.enabled:
+        text_segmenter = TextSegmenter(
+            max_chars=cfg.input.seg_max_chars,
+            hard_max_chars=cfg.input.seg_hard_max_chars,
+        )
+
+        def _text_on_done() -> None:
+            srv = _local_server_holder[0]
+            if srv is not None:
+                asyncio.ensure_future(srv.notify({"event": "done"}))
+
+        def _text_on_error(message: str) -> None:
+            srv = _local_server_holder[0]
+            if srv is not None:
+                asyncio.ensure_future(
+                    srv.notify({"event": "error", "message": message})
+                )
+
+        text_stream_bridge = TextStreamBridge(
+            ws,
+            on_log=window.log,
+            on_done=_text_on_done,
+            on_error=_text_on_error,
+            loop=loop,
+        )
+
+        def _text_on_text(text: str, profile):
+            if active_mic_mode[0] is not None:
+                return "busy: mic active"
+            for ev in text_segmenter.feed(text):
+                if isinstance(ev, StreamStart):
+                    text_stream_bridge.set_profile(profile)
+                text_stream_bridge.handle_event(ev)
+            return None
+
+        def _text_on_final():
+            for ev in text_segmenter.flush():
+                text_stream_bridge.handle_event(ev)
+            return None
+
+        def _text_on_cancel() -> None:
+            text_segmenter.reset()
+            asyncio.ensure_future(ws.cancel())
+
+        local_input_server = LocalInputServer(
+            host=cfg.input.host,
+            port=cfg.input.port,
+            token=cfg.input.token,
+            on_text=_text_on_text,
+            on_final=_text_on_final,
+            on_cancel=_text_on_cancel,
+            on_log=window.log,
+            loop=loop,
+        )
+        _local_server_holder[0] = local_input_server
+
     def _on_state(event: str, payload: object = None) -> None:
         if event == "ready":
             codec_str = getattr(payload, "codec", None) or "?"
@@ -175,6 +240,11 @@ def run_gui(config_path: str | Path) -> None:
             stream_supported[0] = bool(feats.get("speak_stream"))
             stream_bridge.set_supported(stream_supported[0])
             window.set_stream_mode_available(stream_supported[0])
+            text_supported[0] = bool(feats.get("text_stream"))
+            if text_stream_bridge is not None:
+                text_stream_bridge.set_supported(text_supported[0])
+                if not text_supported[0]:
+                    window.log("[input] サーバが text_stream 未対応 → one-shot speak にfallback")
             if not has_auto_tts:
                 window.log("[mic] サーバが auto_tts 非対応: 認識のみ")
                 window.set_mic_enabled(False)
@@ -189,11 +259,15 @@ def run_gui(config_path: str | Path) -> None:
         elif event == "busy":
             window.set_busy(True)
             stream_bridge.notify_ws_busy()
+            if text_stream_bridge is not None:
+                text_stream_bridge.notify_ws_busy()
             if active_mic_mode[0] == "utterance" and mic_holder[0] is not None and mic_holder[0].active and not shutting_down[0] and not mic_reconfiguring[0]:
                 mic_holder[0].pause()
         elif event == "idle":
             window.set_busy(False)
             stream_bridge.notify_ws_idle()
+            if text_stream_bridge is not None:
+                text_stream_bridge.notify_ws_idle()
             if active_mic_mode[0] == "utterance" and mic_enabled_by_user[0] and mic_holder[0] is not None and mic_holder[0].active and not shutting_down[0] and not mic_reconfiguring[0]:
                 mic_holder[0].resume()
         elif event == "connected":
@@ -392,6 +466,12 @@ def run_gui(config_path: str | Path) -> None:
 
     async def _startup():
         await ws.connect()
+        if local_input_server is not None:
+            text_stream_bridge.start()
+            try:
+                await local_input_server.start()
+            except Exception as exc:
+                window.log(f"[input] 入力口の起動失敗: {exc}")
 
     asyncio.ensure_future(_startup())
 
@@ -400,6 +480,10 @@ def run_gui(config_path: str | Path) -> None:
         if mic_holder[0] is not None:
             await asyncio.to_thread(mic_holder[0].stop)
         await stream_bridge.close()
+        if local_input_server is not None:
+            await local_input_server.close()
+        if text_stream_bridge is not None:
+            await text_stream_bridge.close()
         await ws.close()
 
     def _on_quit() -> None:

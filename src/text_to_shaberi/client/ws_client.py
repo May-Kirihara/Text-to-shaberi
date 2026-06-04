@@ -34,6 +34,7 @@ from ..common.protocol import (
     Ready,
     SegBegin,
     SegEnd,
+    SegText,
     Speak,
     StreamBegin,
     StreamEnd,
@@ -404,7 +405,7 @@ class WSClient:
                 self._schedule_reconnect()
             return
 
-    async def start_stream(self, auto_tts: bool = True) -> str | None:
+    async def start_stream(self, auto_tts: bool = True, profile: str | None = None) -> str | None:
         if not self.is_connected():
             ok = await self.connect()
             if not ok:
@@ -438,7 +439,7 @@ class WSClient:
         )
 
         try:
-            await self._send(StreamBegin(id=stream_id, format=fmt, auto_tts=eff_auto))
+            await self._send(StreamBegin(id=stream_id, format=fmt, auto_tts=eff_auto, profile=profile))
         except Exception as exc:
             self._finish_stream()
             self._state("error", str(exc))
@@ -450,29 +451,96 @@ class WSClient:
     async def send_stream_segment(
         self, index: int, pcm: bytes, chunk_bytes: int = 32768
     ) -> None:
-        if self._active_id is None or not self._stream_mode:
-            return
-
         fmt = AudioFormatPayload(
             codec="pcm_s16le",
             sample_rate=self._stt_format.sample_rate,
             channels=1,
         )
         async with self._send_lock:
+            sid = self._active_id
+            if sid is None or not self._stream_mode:
+                return
             await self._ws_send(
-                SegBegin(id=self._active_id, index=index, format=fmt).model_dump_json()
+                SegBegin(id=sid, index=index, format=fmt).model_dump_json()
             )
             for i in range(0, len(pcm), chunk_bytes):
                 await self._ws_send(pcm[i : i + chunk_bytes])
             await self._ws_send(
-                SegEnd(id=self._active_id, index=index).model_dump_json()
+                SegEnd(id=sid, index=index).model_dump_json()
             )
 
     async def end_stream(self) -> None:
-        if self._active_id is None or not self._stream_mode:
-            return
         async with self._send_lock:
-            await self._ws_send(StreamEnd(id=self._active_id).model_dump_json())
+            sid = self._active_id
+            if sid is None or not self._stream_mode:
+                return
+            await self._ws_send(StreamEnd(id=sid).model_dump_json())
+
+    async def start_text_stream(
+        self, auto_tts: bool = True, profile: str | None = None
+    ) -> str | None:
+        if not self.is_connected():
+            ok = await self.connect()
+            if not ok:
+                self._log("接続できません")
+                return None
+
+        if not bool(self._ready and self._ready.features.get("text_stream")):
+            return None
+
+        if self._active_id is not None:
+            return None
+
+        loop = self._loop or asyncio.get_event_loop()
+        stream_id = uuid.uuid4().hex
+        self._active_id = stream_id
+        self._playback_id = None
+        self._stream_mode = True
+        eff_auto = auto_tts and bool(
+            self._ready and self._ready.features.get("auto_tts")
+        )
+        self._stt_auto_tts = eff_auto
+        self._cancelling = False
+        self._first_chunk_logged = False
+        self._t_send = loop.time()
+        self._state("busy")
+        self._metric_kind = "text_stream"
+        self._last_stt_ms = None
+        self._state("metrics", {
+            "kind": "text_stream",
+            "ttfa_ms": None,
+            "stt_ms": None,
+            "codec": self._ready.codec if self._ready else None,
+        })
+
+        profile_val = profile or (self._default_profile or None)
+        try:
+            await self._send(
+                StreamBegin(id=stream_id, mode="text", auto_tts=eff_auto, profile=profile_val)
+            )
+        except Exception as exc:
+            self._finish_stream()
+            self._state("error", str(exc))
+            if not self.is_connected():
+                self._schedule_reconnect()
+            return None
+        return stream_id
+
+    async def send_text_segment(self, index: int, text: str) -> None:
+        async with self._send_lock:
+            sid = self._active_id
+            if sid is None or not self._stream_mode:
+                return
+            await self._ws_send(
+                SegText(id=sid, index=index, text=text).model_dump_json()
+            )
+
+    async def end_text_stream(self) -> None:
+        async with self._send_lock:
+            sid = self._active_id
+            if sid is None or not self._stream_mode:
+                return
+            await self._ws_send(StreamEnd(id=sid).model_dump_json())
 
     async def cancel(self) -> None:
         if self._active_id is None:
@@ -684,6 +752,10 @@ class WSClient:
                     if self._sink is not None:
                         self._sink.end()
                     self._finish_stream()
+            elif msg.id == self._active_id and self._playback_id is None:
+                # 音声ゼロで正常終了した stream（空テキスト等）: 再生は無いが
+                # active を解放して idle 復帰させる(§14.1)。
+                self._finish_stream()
             return
 
         if isinstance(msg, Stopped):
