@@ -32,7 +32,12 @@ from ..common.protocol import (
     ErrorMsg,
     Hello,
     Ready,
+    SegBegin,
+    SegEnd,
     Speak,
+    StreamBegin,
+    StreamEnd,
+    StreamStopped,
     Stopped,
     SttBegin,
     SttEnd,
@@ -114,6 +119,7 @@ class WSClient:
 
         self._metric_kind: str | None = None
         self._last_stt_ms: float | None = None
+        self._stream_mode: bool = False
 
     def _get_loop(self) -> asyncio.AbstractEventLoop:
         if self._loop is not None:
@@ -398,6 +404,76 @@ class WSClient:
                 self._schedule_reconnect()
             return
 
+    async def start_stream(self, auto_tts: bool = True) -> str | None:
+        if not self.is_connected():
+            ok = await self.connect()
+            if not ok:
+                self._log("接続できません")
+                return None
+
+        if not bool(self._ready and self._ready.features.get("speak_stream")):
+            return None
+
+        if self._active_id is not None:
+            return None
+
+        loop = self._loop or asyncio.get_event_loop()
+        stream_id = uuid.uuid4().hex
+        self._active_id = stream_id
+        self._playback_id = None
+        self._stream_mode = True
+        eff_auto = auto_tts and bool(
+            self._ready and self._ready.features.get("auto_tts")
+        )
+        self._stt_auto_tts = eff_auto
+        self._cancelling = False
+        self._first_chunk_logged = False
+        self._t_send = loop.time()
+        self._state("busy")
+
+        fmt = AudioFormatPayload(
+            codec="pcm_s16le",
+            sample_rate=self._stt_format.sample_rate,
+            channels=1,
+        )
+
+        try:
+            await self._send(StreamBegin(id=stream_id, format=fmt, auto_tts=eff_auto))
+        except Exception as exc:
+            self._finish_stream()
+            self._state("error", str(exc))
+            if not self.is_connected():
+                self._schedule_reconnect()
+            return None
+        return stream_id
+
+    async def send_stream_segment(
+        self, index: int, pcm: bytes, chunk_bytes: int = 32768
+    ) -> None:
+        if self._active_id is None or not self._stream_mode:
+            return
+
+        fmt = AudioFormatPayload(
+            codec="pcm_s16le",
+            sample_rate=self._stt_format.sample_rate,
+            channels=1,
+        )
+        async with self._send_lock:
+            await self._ws_send(
+                SegBegin(id=self._active_id, index=index, format=fmt).model_dump_json()
+            )
+            for i in range(0, len(pcm), chunk_bytes):
+                await self._ws_send(pcm[i : i + chunk_bytes])
+            await self._ws_send(
+                SegEnd(id=self._active_id, index=index).model_dump_json()
+            )
+
+    async def end_stream(self) -> None:
+        if self._active_id is None or not self._stream_mode:
+            return
+        async with self._send_lock:
+            await self._ws_send(StreamEnd(id=self._active_id).model_dump_json())
+
     async def cancel(self) -> None:
         if self._active_id is None:
             self._log("cancel: active 無し")
@@ -575,6 +651,10 @@ class WSClient:
 
         if isinstance(msg, Transcript):
             if msg.id == self._active_id:
+                if self._stream_mode:
+                    self._log(f"🎤→ {msg.text}")
+                    self._state("transcript", msg.text)
+                    return
                 text = msg.text
                 self._log(f"🎤→ {text}")
                 self._state("transcript", text)
@@ -612,6 +692,12 @@ class WSClient:
                 self._finish_stream()
             return
 
+        if isinstance(msg, StreamStopped):
+            if msg.id == self._active_id:
+                self._log("stream stopped")
+                self._finish_stream()
+            return
+
         if isinstance(msg, ErrorMsg):
             msg_id = getattr(msg, "id", None)
             if msg_id in {self._active_id, self._playback_id}:
@@ -643,4 +729,5 @@ class WSClient:
         self._first_chunk_logged = False
         self._playback_codec = None
         self._opus_decoder = None
+        self._stream_mode = False
         self._state("idle")

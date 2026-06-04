@@ -63,6 +63,7 @@ class Transcript(BaseModel):
     id: str = ""
     text: str = ""
     final: bool = True
+    index: int | None = None
 
 
 class AudioBegin(BaseModel):
@@ -93,6 +94,37 @@ class ErrorMsg(BaseModel):
     message: str = ""
 
 
+class StreamBegin(BaseModel):
+    type: Literal["stream_begin"] = "stream_begin"
+    id: str = ""
+    format: AudioFormatPayload = AudioFormatPayload()
+    auto_tts: bool = True
+
+
+class SegBegin(BaseModel):
+    type: Literal["seg_begin"] = "seg_begin"
+    id: str = ""
+    index: int = 0
+    format: AudioFormatPayload = AudioFormatPayload()
+    prev_tail: str = ""
+
+
+class SegEnd(BaseModel):
+    type: Literal["seg_end"] = "seg_end"
+    id: str = ""
+    index: int = 0
+
+
+class StreamEnd(BaseModel):
+    type: Literal["stream_end"] = "stream_end"
+    id: str = ""
+
+
+class StreamStopped(BaseModel):
+    type: Literal["stream_stopped"] = "stream_stopped"
+    id: str = ""
+
+
 _MESSAGE_TYPES: dict[str, type[BaseModel]] = {
     "hello": Hello,
     "ready": Ready,
@@ -105,6 +137,11 @@ _MESSAGE_TYPES: dict[str, type[BaseModel]] = {
     "cancel": Cancel,
     "stopped": Stopped,
     "error": ErrorMsg,
+    "stream_begin": StreamBegin,
+    "seg_begin": SegBegin,
+    "seg_end": SegEnd,
+    "stream_end": StreamEnd,
+    "stream_stopped": StreamStopped,
 }
 
 

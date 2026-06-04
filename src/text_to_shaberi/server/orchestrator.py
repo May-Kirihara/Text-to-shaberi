@@ -10,6 +10,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from typing import Any
 from uuid import uuid4
 
 import numpy as np
@@ -31,7 +32,12 @@ from ..common.protocol import (
     Hello,
     ProfileInfo,
     Ready,
+    SegBegin,
+    SegEnd,
     Speak,
+    StreamBegin,
+    StreamEnd,
+    StreamStopped,
     Stopped,
     SttBegin,
     SttEnd,
@@ -73,6 +79,7 @@ class Session:
         self.stt_buffer: bytearray = bytearray()
         self.stt_format: AudioFormatPayload | None = None
         self.stt_auto_tts: bool = False
+        self.active_stream_session: StreamSession | None = None
         self._send_lock = asyncio.Lock()
         self._handshake_done = False
         self.codec: str = "pcm_s16le"
@@ -84,6 +91,10 @@ class Session:
         return (
             self.active_stt_id is not None
             or (self.active_task is not None and not self.active_task.done())
+            or (
+                self.active_stream_session is not None
+                and not self.active_stream_session.done()
+            )
         )
 
     def _reset_stt_capture(self) -> None:
@@ -107,6 +118,12 @@ class Session:
     async def _send_stopped_best_effort(self, stream_id: str) -> None:
         try:
             await self._send_model(Stopped(id=stream_id))
+        except Exception:
+            pass
+
+    async def _send_stopped_best_effort_stream(self, stream_id: str) -> None:
+        try:
+            await self._send_model(StreamStopped(id=stream_id))
         except Exception:
             pass
 
@@ -217,7 +234,7 @@ class Session:
             tts=fmt,
             profiles=self.state.available_profiles,
             limits=limits,
-            features={"auto_tts": True},
+            features={"auto_tts": True, "speak_stream": True},
         )
         await self._send_model(ready)
         self._handshake_done = True
@@ -253,6 +270,14 @@ class Session:
                 await self._handle_stt_end(parsed)
             elif isinstance(parsed, Speak):
                 await self._handle_speak(parsed)
+            elif isinstance(parsed, StreamBegin):
+                await self._handle_stream_begin(parsed)
+            elif isinstance(parsed, SegBegin):
+                await self._handle_seg_begin(parsed)
+            elif isinstance(parsed, SegEnd):
+                await self._handle_seg_end(parsed)
+            elif isinstance(parsed, StreamEnd):
+                await self._handle_stream_end(parsed)
             elif isinstance(parsed, Cancel):
                 await self._handle_cancel(parsed)
             else:
@@ -383,6 +408,9 @@ class Session:
         self.stt_auto_tts = msg.auto_tts
 
     async def _handle_binary(self, data: bytes) -> None:
+        if self.active_stream_session is not None:
+            self.active_stream_session.feed_binary(data)
+            return
         if self.active_stt_id is None:
             await self._send_model(ErrorMsg(id=None, message="no active stt stream"))
             return
@@ -474,6 +502,12 @@ class Session:
     # cancel
     # ------------------------------------------------------------------
     async def _handle_cancel(self, msg: Cancel) -> None:
+        if (
+            self.active_stream_session is not None
+            and msg.id == self.active_stream_session.stream_id
+        ):
+            await self.active_stream_session.stop()
+            return
         if msg.id == self.active_stt_id:
             self._reset_stt_capture()
             await self._send_model(Stopped(id=msg.id))
@@ -487,9 +521,69 @@ class Session:
             await self._send_model(ErrorMsg(id=msg.id, message="no active stream"))
 
     # ------------------------------------------------------------------
+    # speak_stream handlers
+    # ------------------------------------------------------------------
+    async def _handle_stream_begin(self, msg: StreamBegin) -> None:
+        if not msg.id:
+            await self._send_model(
+                ErrorMsg(id=None, message="stream_begin.id is required")
+            )
+            return
+        if self._busy():
+            await self._send_model(
+                ErrorMsg(id=msg.id, message="busy: stream already active")
+            )
+            return
+        from .config import ServerConfig
+
+        cfg: ServerConfig = self.state.config
+        try:
+            profile = load_profile(self.state.profiles_dir, cfg.tts.active_profile)
+        except Exception as exc:
+            await self._send_model(
+                ErrorMsg(id=msg.id, message=f"failed to load profile: {exc}")
+            )
+            return
+        sess = StreamSession(self, msg.id, msg.format, msg.auto_tts, profile)
+        self.active_stream_session = sess
+        sess.start()
+
+    async def _handle_seg_begin(self, msg: SegBegin) -> None:
+        s = self.active_stream_session
+        if s is None or msg.id != s.stream_id:
+            await self._send_model(
+                ErrorMsg(id=msg.id, message="no active stream")
+            )
+            return
+        s.open_segment(msg.index)
+
+    async def _handle_seg_end(self, msg: SegEnd) -> None:
+        s = self.active_stream_session
+        if s is None or msg.id != s.stream_id:
+            await self._send_model(
+                ErrorMsg(id=msg.id, message="no active stream")
+            )
+            return
+        s.close_segment(msg.index)
+
+    async def _handle_stream_end(self, msg: StreamEnd) -> None:
+        s = self.active_stream_session
+        if s is None or msg.id != s.stream_id:
+            await self._send_model(
+                ErrorMsg(id=msg.id, message="no active stream")
+            )
+            return
+        s.mark_end()
+
+    # ------------------------------------------------------------------
     # 切断 cleanup
     # ------------------------------------------------------------------
     async def _cleanup(self) -> None:
+        if self.active_stream_session is not None:
+            try:
+                await self.active_stream_session.stop()
+            except Exception:
+                pass
         if self.active_task is not None and not self.active_task.done():
             self.active_task.cancel()
             try:
@@ -500,3 +594,184 @@ class Session:
         self.active_stream_id = None
         self.active_parent_id = None
         self._reset_stt_capture()
+
+
+_SEG_END = object()
+
+
+class StreamSession:
+    def __init__(
+        self,
+        session: Session,
+        stream_id: str,
+        fmt: AudioFormatPayload,
+        auto_tts: bool,
+        profile: TTSProfile,
+    ) -> None:
+        self.session = session
+        self.stream_id = stream_id
+        self.fmt = fmt
+        self.auto_tts = auto_tts
+        self.profile = profile
+        self._seg_in_q: asyncio.Queue = asyncio.Queue()
+        self._text_q: asyncio.Queue = asyncio.Queue()
+        self._cur_index: int | None = None
+        self._cur_buf: bytearray | None = None
+        self._cancelled = False
+        self._stopped_sent = False
+        self._audio_begun = False
+        self._tasks: list[asyncio.Task] = []
+
+    def start(self) -> None:
+        self._tasks = [
+            asyncio.create_task(self._stt_worker()),
+            asyncio.create_task(self._gen_output_worker()),
+        ]
+
+    def done(self) -> bool:
+        return bool(self._tasks) and all(t.done() for t in self._tasks)
+
+    # --- 入力 ---
+    def open_segment(self, index: int) -> None:
+        self._cur_index = index
+        self._cur_buf = bytearray()
+
+    def feed_binary(self, data: bytes) -> None:
+        if self._cur_buf is not None:
+            self._cur_buf += data
+
+    def close_segment(self, index: int) -> None:
+        if self._cur_buf is not None:
+            self._seg_in_q.put_nowait((index, bytes(self._cur_buf)))
+        self._cur_buf = None
+        self._cur_index = None
+
+    def mark_end(self) -> None:
+        self._seg_in_q.put_nowait(_SEG_END)
+
+    # --- STT ワーカ（1固定・cancelled フラグで遅延結果破棄）---
+    async def _stt_worker(self) -> None:
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                item = await self._seg_in_q.get()
+                if item is _SEG_END:
+                    await self._text_q.put(_SEG_END)
+                    return
+                index, buf = item
+                fmt = self.fmt
+                frame_bytes = bytes_per_sample(fmt.codec) * fmt.channels
+                usable = len(buf) - (len(buf) % frame_bytes)
+                samples = _pcm_to_float32(buf[:usable], fmt.codec, fmt.channels)
+                if samples.size == 0:
+                    text = ""
+                else:
+                    text = await loop.run_in_executor(
+                        self.session.state.stt_executor,
+                        self.session.state.stt_engine.transcribe,
+                        samples,
+                        fmt.sample_rate,
+                        self.session.state.language,
+                    )
+                if self._cancelled:
+                    continue
+                await self.session._send_model(
+                    Transcript(
+                        id=self.stream_id, index=index, text=text, final=True
+                    )
+                )
+                if self.auto_tts and text.strip():
+                    await self._text_q.put((index, text))
+        except asyncio.CancelledError:
+            raise
+
+    # --- 生成/出力ワーカ（N=1・1本の連続音声）---
+    async def _gen_output_worker(self) -> None:
+        # ★N≥2 拡張点: ここを「gen プール(N)→reorder(next_index)→output」に差し替える(§9.2)。
+        #   Phase A は N=1: text を index 順に取り出し、単一 OpusStreamEncoder を全 seg で共有して連続送出。
+        cfg = self.session.state.config
+        use_opus = self.session.codec == OPUS_CODEC_NAME
+        enc = None
+        try:
+            while True:
+                item = await self._text_q.get()
+                if item is _SEG_END:
+                    break
+                index, text = item
+                if not self._audio_begun:
+                    self._audio_begun = True
+                    if use_opus:
+                        await self.session._send_model(
+                            AudioBegin(
+                                id=self.stream_id,
+                                parent_id=None,
+                                format=opus_wire_format(),
+                            )
+                        )
+                        enc = OpusStreamEncoder(
+                            src_rate=self.profile.audio.sample_rate,
+                            bitrate=cfg.transport.opus_bitrate,
+                        )
+                    else:
+                        fmt = AudioFormatPayload(
+                            codec="pcm_s16le",
+                            sample_rate=self.profile.audio.sample_rate,
+                            channels=self.profile.audio.channels,
+                        )
+                        await self.session._send_model(
+                            AudioBegin(
+                                id=self.stream_id, parent_id=None, format=fmt
+                            )
+                        )
+                src_channels = self.profile.audio.channels
+                src_codec = self.profile.audio.encoding or "pcm_s16le"
+                async for chunk in self.session.state.tts_client.stream(
+                    self.profile, text
+                ):
+                    if self._cancelled:
+                        break
+                    if use_opus:
+                        mono = self.session._to_mono_int16(
+                            chunk, src_codec, src_channels
+                        )
+                        for pkt in enc.feed(mono):
+                            await self.session._send_bytes(pkt)
+                    else:
+                        await self.session._send_bytes(chunk)
+                if self._cancelled:
+                    break
+            # 正常終端
+            if self._audio_begun and not self._cancelled:
+                if use_opus and enc is not None:
+                    for pkt in enc.flush():
+                        await self.session._send_bytes(pkt)
+                await self.session._send_model(AudioEnd(id=self.stream_id))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self.session._send_model(
+                ErrorMsg(id=self.stream_id, message=repr(exc))
+            )
+        finally:
+            if (
+                self.session.active_stream_session is self
+                and not self._cancelled
+            ):
+                self.session.active_stream_session = None
+
+    # --- 冪等 stop（cancel/切断）---
+    async def stop(self) -> None:
+        if self._stopped_sent:
+            return
+        self._stopped_sent = True
+        self._cancelled = True
+        for t in self._tasks:
+            t.cancel()
+        for t in self._tasks:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+        await self.session._send_stopped_best_effort_stream(self.stream_id)
+        if self.session.active_stream_session is self:
+            self.session.active_stream_session = None
