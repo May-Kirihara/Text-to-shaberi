@@ -35,6 +35,8 @@ class MicCapture:
         loop: Any | None = None,
         stream_factory: Callable[..., Any] | None = None,
         segmenter_factory: Callable[..., Any] | None = None,
+        stream_mode: bool = False,
+        on_event: Callable[[object], None] | None = None,
     ) -> None:
         self._sample_rate = sample_rate
         self._channels = channels
@@ -44,10 +46,31 @@ class MicCapture:
         self._on_log = on_log
         self._loop = loop
         self._stream_factory = stream_factory
+        self._stream_mode = stream_mode
+        self._on_event = on_event
         self._frame_samples = int(sample_rate * frame_ms / 1000)
 
         if segmenter_factory is not None:
             self._segmenter = segmenter_factory()
+        elif self._stream_mode:
+            from .vad import StreamingVadSegmenter
+
+            vad_cfg = vad_config
+            preprocess = getattr(vad_cfg, "preprocess", None) if vad_cfg else None
+            vad = getattr(vad_cfg, "vad", None) if vad_cfg else None
+
+            self._segmenter = StreamingVadSegmenter(
+                sample_rate=sample_rate,
+                frame_ms=frame_ms,
+                aggressiveness=getattr(vad, "aggressiveness", 2) if vad else 2,
+                seg_silence_ms=getattr(vad, "seg_silence_ms", 250) if vad else 250,
+                end_silence_ms=getattr(vad, "end_silence_ms", 500) if vad else 500,
+                seg_min_ms=getattr(vad, "seg_min_ms", 400) if vad else 400,
+                seg_max_ms=getattr(vad, "seg_max_ms", 2500) if vad else 2500,
+                speech_pad_ms=getattr(vad, "speech_pad_ms", 150) if vad else 150,
+                gate=getattr(preprocess, "gate", True) if preprocess else True,
+                gate_threshold=getattr(preprocess, "gate_threshold", 200) if preprocess else 200,
+            )
         else:
             from .vad import VadSegmenter
 
@@ -150,6 +173,10 @@ class MicCapture:
         if self._loop and self._on_segment:
             self._loop.call_soon_threadsafe(self._on_segment, seg)
 
+    def _emit_event(self, ev: object) -> None:
+        if self._loop and self._on_event:
+            self._loop.call_soon_threadsafe(self._on_event, ev)
+
     def _log(self, msg: str) -> None:
         if self._loop and self._on_log:
             self._loop.call_soon_threadsafe(self._on_log, msg)
@@ -169,11 +196,19 @@ class MicCapture:
                         self._reset_pending.clear()
                     continue
                 pcm = _to_int16_mono_bytes(data, self._channels)
-                for seg in self._segmenter.feed(pcm):
-                    self._emit_segment(seg)
-            if not self._discard_tail:
-                tail = self._segmenter.flush()
-                if tail:
-                    self._emit_segment(tail)
+                if self._stream_mode:
+                    for ev in self._segmenter.feed(pcm):
+                        self._emit_event(ev)
+                else:
+                    for seg in self._segmenter.feed(pcm):
+                        self._emit_segment(seg)
+            if self._stream_mode:
+                for ev in self._segmenter.flush():
+                    self._emit_event(ev)
+            else:
+                if not self._discard_tail:
+                    tail = self._segmenter.flush()
+                    if tail:
+                        self._emit_segment(tail)
         except Exception:
             pass

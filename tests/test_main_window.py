@@ -113,3 +113,30 @@ class TestMainWindowConnection:
         window = MainWindow(cfg)
         window.set_connection("\u2713 codec:opus")
         assert "\u2713 codec:opus" in window.connection_label.text()
+
+
+class TestMainWindowModeToggle:
+    def test_on_mode_toggle_callback(self, qapp):
+        cfg = ClientConfig()
+        window = MainWindow(cfg)
+        calls = []
+        window.set_on_mode_toggle(lambda c: calls.append(c))
+        window.mode_button.setEnabled(True)
+        window.mode_button.setChecked(True)
+        assert calls == [True]
+
+    def test_set_stream_mode_no_signal(self, qapp):
+        cfg = ClientConfig()
+        window = MainWindow(cfg)
+        calls = []
+        window.set_on_mode_toggle(lambda c: calls.append(c))
+        window.set_stream_mode(True)
+        assert window.mode_button.isChecked() is True
+        assert window.mode_button.text() == "ストリーミング"
+        assert calls == []
+
+    def test_set_stream_mode_available_false(self, qapp):
+        cfg = ClientConfig()
+        window = MainWindow(cfg)
+        window.set_stream_mode_available(False)
+        assert window.mode_button.isEnabled() is False

@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPlainTextEdit,
     QPushButton,
-    QStatusBar,
     QVBoxLayout,
     QWidget,
 )
@@ -36,6 +35,7 @@ class MainWindow(QMainWindow):
         self._on_stop: Callable[[], None] | None = None
         self._on_settings: Callable[[], None] | None = None
         self._on_mic_toggle: Callable[[bool], None] | None = None
+        self._on_mode_toggle: Callable[[bool], None] | None = None
 
         self.setWindowTitle("Text-to-shaberi")
         self.resize(680, 460)
@@ -79,6 +79,14 @@ class MainWindow(QMainWindow):
         self.mic_button.setFixedWidth(56)
         self.mic_button.toggled.connect(self._handle_mic_toggle)
 
+        self.mode_button = QPushButton("発話単位")
+        self.mode_button.setCheckable(True)
+        self.mode_button.setFixedWidth(96)
+        self.mode_button.setToolTip("発話単位 / ストリーミング(喋りながら順次TTS) 切替")
+        self.mode_button.toggled.connect(self._handle_mode_toggle)
+        self.mode_button.setEnabled(False)
+
+        input_row.addWidget(self.mode_button)
         input_row.addWidget(self.mic_button)
         input_row.addWidget(self.text_input, 1)
         input_row.addWidget(self.send_button)
@@ -190,6 +198,27 @@ class MainWindow(QMainWindow):
             self.mic_button.setText(_MIC_LABEL_OFF)
         if self._on_mic_toggle is not None:
             self._on_mic_toggle(checked)
+
+    def set_on_mode_toggle(self, callback: Callable[[bool], None]) -> None:
+        self._on_mode_toggle = callback
+
+    def _handle_mode_toggle(self, checked: bool) -> None:
+        self.mode_button.setText("ストリーミング" if checked else "発話単位")
+        if self._on_mode_toggle is not None:
+            self._on_mode_toggle(checked)
+
+    def set_stream_mode(self, stream: bool) -> None:
+        self.mode_button.blockSignals(True)
+        self.mode_button.setChecked(stream)
+        self.mode_button.setText("ストリーミング" if stream else "発話単位")
+        self.mode_button.blockSignals(False)
+
+    def set_stream_mode_available(self, available: bool) -> None:
+        self.mode_button.setEnabled(available)
+        if not available:
+            self.mode_button.setToolTip("サーバが speak_stream 未対応")
+        else:
+            self.mode_button.setToolTip("発話単位 / ストリーミング(喋りながら順次TTS) 切替")
 
     def log(self, message: str) -> None:
         self.log_view.appendPlainText(message)

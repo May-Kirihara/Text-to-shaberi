@@ -652,7 +652,7 @@ class WSClient:
         if isinstance(msg, Transcript):
             if msg.id == self._active_id:
                 if self._stream_mode:
-                    self._log(f"🎤→ {msg.text}")
+                    # 字幕は app 側 _on_state("transcript") が1回ログする（二重ログ回避・codex §8.7）
                     self._state("transcript", msg.text)
                     return
                 text = msg.text

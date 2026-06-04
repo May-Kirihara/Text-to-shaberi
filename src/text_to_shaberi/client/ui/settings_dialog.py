@@ -116,6 +116,30 @@ class SettingsDialog(QDialog):
         )
         mic_form.addRow("ゲート閾値:", self.gate_threshold_spin)
 
+        self.seg_silence_ms_spin = QSpinBox()
+        self.seg_silence_ms_spin.setRange(100, 2000)
+        self.seg_silence_ms_spin.setValue(getattr(vad_cfg, "seg_silence_ms", 250) if vad_cfg else 250)
+        mic_form.addRow("サブseg無音ms:", self.seg_silence_ms_spin)
+
+        self.end_silence_ms_spin = QSpinBox()
+        self.end_silence_ms_spin.setRange(100, 3000)
+        self.end_silence_ms_spin.setValue(getattr(vad_cfg, "end_silence_ms", 500) if vad_cfg else 500)
+        mic_form.addRow("発話末無音ms:", self.end_silence_ms_spin)
+
+        self.seg_min_ms_spin = QSpinBox()
+        self.seg_min_ms_spin.setRange(50, 2000)
+        self.seg_min_ms_spin.setValue(getattr(vad_cfg, "seg_min_ms", 400) if vad_cfg else 400)
+        mic_form.addRow("最小seg ms:", self.seg_min_ms_spin)
+
+        self.seg_max_ms_spin = QSpinBox()
+        self.seg_max_ms_spin.setRange(500, 10000)
+        self.seg_max_ms_spin.setValue(getattr(vad_cfg, "seg_max_ms", 2500) if vad_cfg else 2500)
+        mic_form.addRow("最大seg ms:", self.seg_max_ms_spin)
+
+        self.stream_mode_check = QCheckBox()
+        self.stream_mode_check.setChecked(getattr(mic_cfg, "stream_mode", False) if mic_cfg else False)
+        mic_form.addRow("既定でストリーミング:", self.stream_mode_check)
+
         root_layout.addWidget(mic_group)
 
         output_group = QGroupBox("出力")
@@ -211,11 +235,16 @@ class SettingsDialog(QDialog):
             },
             "mic": {
                 "device": mic_dev_str,
+                "stream_mode": self.stream_mode_check.isChecked(),
             },
             "mic.vad": {
                 "aggressiveness": self.aggressiveness_spin.value(),
                 "min_silence_ms": self.min_silence_ms_spin.value(),
                 "speech_pad_ms": self.speech_pad_ms_spin.value(),
+                "seg_silence_ms": self.seg_silence_ms_spin.value(),
+                "end_silence_ms": self.end_silence_ms_spin.value(),
+                "seg_min_ms": self.seg_min_ms_spin.value(),
+                "seg_max_ms": self.seg_max_ms_spin.value(),
             },
             "mic.preprocess": {
                 "gate": self.gate_check.isChecked(),

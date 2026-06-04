@@ -93,6 +93,17 @@ class TestSettingsDialogInit:
         assert isinstance(vad["aggressiveness"], int)
         assert isinstance(vad["min_silence_ms"], int)
         assert isinstance(vad["speech_pad_ms"], int)
+        assert "seg_silence_ms" in vad
+        assert "end_silence_ms" in vad
+        assert "seg_min_ms" in vad
+        assert "seg_max_ms" in vad
+
+    def test_values_mic_stream_mode(self, qapp):
+        cfg = ClientConfig()
+        dlg = SettingsDialog(None, cfg)
+        vals = dlg.values()
+        assert "stream_mode" in vals["mic"]
+        assert isinstance(vals["mic"]["stream_mode"], bool)
 
     def test_values_mic_preprocess_types(self, qapp):
         cfg = ClientConfig()

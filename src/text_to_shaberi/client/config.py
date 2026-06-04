@@ -1,6 +1,7 @@
 """クライアント設定 (client.toml) のロード。"""
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,6 +36,10 @@ class VADConfig:
     frame_ms: int = 30
     min_speech_ms: int = 200
     max_speech_ms: int = 30000
+    seg_silence_ms: int = 250
+    end_silence_ms: int = 500
+    seg_min_ms: int = 400
+    seg_max_ms: int = 2500
 
 
 @dataclass(slots=True)
@@ -49,6 +54,7 @@ class MicConfig:
     device: str = "default"
     sample_rate: int = 16000
     channels: int = 1
+    stream_mode: bool = False
     preprocess: MicPreprocessConfig = field(default_factory=MicPreprocessConfig)
     vad: VADConfig = field(default_factory=VADConfig)
 
@@ -77,13 +83,14 @@ def load_client_config(path: str | Any) -> ClientConfig:
     mic_raw = raw.get("mic") or {}
     preprocess_raw = mic_raw.get("preprocess") or {}
     vad_raw = mic_raw.get("vad") or {}
-    return ClientConfig(
+    cfg = ClientConfig(
         server=ServerConfig(**_only(raw.get("server") or {}, ServerConfig)),
         output=OutputConfig(**_only(raw.get("output") or {}, OutputConfig)),
         mic=MicConfig(
             device=mic_raw.get("device", "default"),
             sample_rate=int(mic_raw.get("sample_rate", 16000)),
             channels=int(mic_raw.get("channels", 1)),
+            stream_mode=bool(mic_raw.get("stream_mode", False)),
             preprocess=MicPreprocessConfig(
                 **_only(preprocess_raw, MicPreprocessConfig)
             ),
@@ -92,3 +99,24 @@ def load_client_config(path: str | Any) -> ClientConfig:
         ui=UIConfig(**_only(raw.get("ui") or {}, UIConfig)),
         profile=ProfileConfig(**_only(raw.get("profile") or {}, ProfileConfig)),
     )
+
+    vad = cfg.mic.vad
+    clamped = False
+    vad.seg_silence_ms = max(1, vad.seg_silence_ms)
+    vad.end_silence_ms = max(1, vad.end_silence_ms)
+    vad.seg_min_ms = max(1, vad.seg_min_ms)
+    vad.seg_max_ms = max(1, vad.seg_max_ms)
+    floor = vad.seg_silence_ms + 2 * vad.frame_ms
+    if vad.end_silence_ms < floor:
+        clamped = True
+        vad.end_silence_ms = floor
+    if vad.seg_max_ms < vad.seg_min_ms:
+        clamped = True
+        vad.seg_max_ms = vad.seg_min_ms
+    if clamped:
+        print(
+            f"[config] VADパラメータをクランプしました: "
+            f"end_silence_ms={vad.end_silence_ms}, seg_max_ms={vad.seg_max_ms}",
+            file=sys.stderr,
+        )
+    return cfg

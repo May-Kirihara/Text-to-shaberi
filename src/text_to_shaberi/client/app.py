@@ -104,7 +104,6 @@ def _setup_input_method(cfg) -> None:
 
 
 def run_gui(config_path: str | Path) -> None:
-    import asyncio
 
     import qasync
     from PySide6.QtWidgets import QApplication
@@ -112,13 +111,14 @@ def run_gui(config_path: str | Path) -> None:
     from ..common.protocol import AudioFormatPayload
     from .ui.main_window import MainWindow
     from .ws_client import WSClient
+    from .stream_bridge import StreamBridge
     from .settings_store import update_client_toml
 
     cfg = load_client_config(config_path)
 
     os.environ.setdefault(
         "PULSE_PROP",
-        f"application.name=text-to-shaberi media.role=production",
+        "application.name=text-to-shaberi media.role=production",
     )
 
     _setup_input_method(cfg)
@@ -129,6 +129,7 @@ def run_gui(config_path: str | Path) -> None:
 
     window = MainWindow(cfg, output_devices=_load_output_devices())
     window.set_output_device(cfg.output.device)
+    window.set_mic_enabled(False)  # ready まで mic 無効（codex MED①）
 
     _profiles: list = []
     mic_enabled_by_user = [False]
@@ -158,6 +159,10 @@ def run_gui(config_path: str | Path) -> None:
     )
 
     mic_holder: list = [None]
+    mic_stream_mode = [cfg.mic.stream_mode]
+    active_mic_mode = [None]
+    stream_supported = [False]
+    stream_bridge = StreamBridge(ws, on_log=window.log, loop=loop)
 
     def _on_state(event: str, payload: object = None) -> None:
         if event == "ready":
@@ -165,25 +170,31 @@ def run_gui(config_path: str | Path) -> None:
             window.set_connection(f"\u2713 codec:{codec_str}")
             nonlocal _profiles
             _profiles = payload.profiles if payload else []
-            has_auto_tts = payload.features.get("auto_tts") if payload else False
+            feats = payload.features if payload else {}
+            has_auto_tts = feats.get("auto_tts")
+            stream_supported[0] = bool(feats.get("speak_stream"))
+            stream_bridge.set_supported(stream_supported[0])
+            window.set_stream_mode_available(stream_supported[0])
             if not has_auto_tts:
                 window.log("[mic] サーバが auto_tts 非対応: 認識のみ")
                 window.set_mic_enabled(False)
             else:
                 window.set_mic_enabled(True)
+            if mic_stream_mode[0] and not stream_supported[0]:
+                mic_stream_mode[0] = False
+                window.set_stream_mode(False)
+                window.log("[stream] サーバが speak_stream 未対応 → 発話単位に切替")
+                if active_mic_mode[0] == "stream" and mic_enabled_by_user[0]:
+                    asyncio.ensure_future(_reconfigure_mic_async())
         elif event == "busy":
             window.set_busy(True)
-            if mic_holder[0] is not None and mic_holder[0].active and not shutting_down[0] and not mic_reconfiguring[0]:
+            stream_bridge.notify_ws_busy()
+            if active_mic_mode[0] == "utterance" and mic_holder[0] is not None and mic_holder[0].active and not shutting_down[0] and not mic_reconfiguring[0]:
                 mic_holder[0].pause()
         elif event == "idle":
             window.set_busy(False)
-            if (
-                mic_enabled_by_user[0]
-                and mic_holder[0] is not None
-                and mic_holder[0].active
-                and not shutting_down[0]
-                and not mic_reconfiguring[0]
-            ):
+            stream_bridge.notify_ws_idle()
+            if active_mic_mode[0] == "utterance" and mic_enabled_by_user[0] and mic_holder[0] is not None and mic_holder[0].active and not shutting_down[0] and not mic_reconfiguring[0]:
                 mic_holder[0].resume()
         elif event == "connected":
             window.log("[ws] connected")
@@ -199,7 +210,6 @@ def run_gui(config_path: str | Path) -> None:
             window.log(f"\U0001f3a4\u2192 {payload}")
         elif event == "metrics":
             p = payload or {}
-            kind = p.get("kind", "?")
             codec_val = p.get("codec") or "?"
             parts = [f"codec:{codec_val}"]
             stt = p.get("stt_ms")
@@ -249,6 +259,16 @@ def run_gui(config_path: str | Path) -> None:
                 cfg.mic.vad.aggressiveness = vad_vals.get("aggressiveness", cfg.mic.vad.aggressiveness)
                 cfg.mic.vad.min_silence_ms = vad_vals.get("min_silence_ms", cfg.mic.vad.min_silence_ms)
                 cfg.mic.vad.speech_pad_ms = vad_vals.get("speech_pad_ms", cfg.mic.vad.speech_pad_ms)
+                cfg.mic.vad.seg_silence_ms = vad_vals.get("seg_silence_ms", cfg.mic.vad.seg_silence_ms)
+                cfg.mic.vad.end_silence_ms = vad_vals.get("end_silence_ms", cfg.mic.vad.end_silence_ms)
+                cfg.mic.vad.seg_min_ms = vad_vals.get("seg_min_ms", cfg.mic.vad.seg_min_ms)
+                cfg.mic.vad.seg_max_ms = vad_vals.get("seg_max_ms", cfg.mic.vad.seg_max_ms)
+
+            mic_only_vals = vals.get("mic", {})
+            if "stream_mode" in mic_only_vals:
+                cfg.mic.stream_mode = bool(mic_only_vals["stream_mode"])
+                mic_stream_mode[0] = cfg.mic.stream_mode and stream_supported[0]
+                window.set_stream_mode(mic_stream_mode[0])
 
             preprocess_vals = vals.get("mic.preprocess", {})
             if preprocess_vals:
@@ -268,19 +288,9 @@ def run_gui(config_path: str | Path) -> None:
             )
             asyncio.ensure_future(ws.reconnect(cfg.server.address, cfg.server.token))
 
-            mic_reconfiguring[0] = True
-            if mic_holder[0] is not None:
-                try:
-                    mic_holder[0].stop()
-                except Exception:
-                    pass
-                mic_holder[0] = None
-            mic_reconfiguring[0] = False
-            # マイクON中に設定変更したら、新しい VAD/マイク設定で即再開（トグルし直し不要）
-            if mic_enabled_by_user[0]:
-                on_mic_toggle(True)
-
             window.set_output_device(cfg.output.device)
+            if mic_enabled_by_user[0]:
+                asyncio.ensure_future(_reconfigure_mic_async())
 
     _last_skip_log = [0.0]
 
@@ -296,36 +306,87 @@ def run_gui(config_path: str | Path) -> None:
     def on_mic_toggle(active: bool) -> None:
         mic_enabled_by_user[0] = active
         if active:
+            desired = "stream" if (mic_stream_mode[0] and stream_supported[0]) else "utterance"
             if mic_holder[0] is None:
                 from .audio.mic import MicCapture
                 from .audio.devices import resolve_device
 
                 dev = resolve_device(cfg.mic.device, kind="input")
-                mic_holder[0] = MicCapture(
-                    sample_rate=cfg.mic.sample_rate,
-                    channels=cfg.mic.channels,
-                    device=dev,
-                    frame_ms=cfg.mic.vad.frame_ms,
-                    vad_config=cfg.mic,
-                    on_segment=on_segment,
-                    on_log=window.log,
-                    loop=loop,
-                )
+                if desired == "stream":
+                    stream_bridge.start()
+                    mic_holder[0] = MicCapture(
+                        sample_rate=cfg.mic.sample_rate,
+                        channels=cfg.mic.channels,
+                        device=dev,
+                        frame_ms=cfg.mic.vad.frame_ms,
+                        vad_config=cfg.mic,
+                        on_event=stream_bridge.handle_event,
+                        on_log=window.log,
+                        loop=loop,
+                        stream_mode=True,
+                    )
+                else:
+                    mic_holder[0] = MicCapture(
+                        sample_rate=cfg.mic.sample_rate,
+                        channels=cfg.mic.channels,
+                        device=dev,
+                        frame_ms=cfg.mic.vad.frame_ms,
+                        vad_config=cfg.mic,
+                        on_segment=on_segment,
+                        on_log=window.log,
+                        loop=loop,
+                    )
+                active_mic_mode[0] = desired
             try:
                 mic_holder[0].start()
-                window.log("[mic] 録音開始")
+                window.log(f"[mic] 録音開始 ({active_mic_mode[0]})")
             except Exception as exc:
                 window.log(f"[mic] 開始失敗: {exc}")
                 window.set_mic_active(False)
         else:
             if mic_holder[0] is not None:
-                mic_holder[0].stop()
+                try:
+                    mic_holder[0].stop()
+                except Exception:
+                    pass
+                mic_holder[0] = None
                 window.log("[mic] 録音停止")
+            if active_mic_mode[0] == "stream":
+                asyncio.ensure_future(stream_bridge.close())
+            active_mic_mode[0] = None
+
+    async def _reconfigure_mic_async() -> None:
+        mic_reconfiguring[0] = True
+        try:
+            if mic_holder[0] is not None:
+                await asyncio.to_thread(mic_holder[0].stop)
+                mic_holder[0] = None
+            if active_mic_mode[0] == "stream":
+                await stream_bridge.close()
+            active_mic_mode[0] = None
+        finally:
+            mic_reconfiguring[0] = False
+        if mic_enabled_by_user[0]:
+            on_mic_toggle(True)
+
+    def on_mode_toggle(stream: bool) -> None:
+        mic_stream_mode[0] = stream
+        cfg.mic.stream_mode = stream
+        try:
+            update_client_toml(config_path, {"mic": {"stream_mode": stream}})
+        except Exception as exc:
+            window.log(f"[settings] モード保存失敗: {exc}")
+        window.log(f"[mic] モード: {'ストリーミング' if stream else '発話単位'}")
+        if mic_enabled_by_user[0]:
+            asyncio.ensure_future(_reconfigure_mic_async())
 
     window.set_on_speak(on_speak)
     window.set_on_stop(on_stop)
     window.set_on_settings(on_settings)
     window.set_on_mic_toggle(on_mic_toggle)
+    window.set_on_mode_toggle(on_mode_toggle)
+    window.set_stream_mode(mic_stream_mode[0])
+    window.set_stream_mode_available(False)
 
     window.show()
 
@@ -338,6 +399,7 @@ def run_gui(config_path: str | Path) -> None:
         shutting_down[0] = True
         if mic_holder[0] is not None:
             await asyncio.to_thread(mic_holder[0].stop)
+        await stream_bridge.close()
         await ws.close()
 
     def _on_quit() -> None:
