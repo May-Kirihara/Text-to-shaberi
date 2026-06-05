@@ -211,6 +211,7 @@ uv run pytest -q                          # 全テスト（Qt は offscreen で�
 
 - テストは外部サービス（GPT-SoVITS/Qwen/実マイク/GPU）不要で完結します（fake 注入）。
 - 進め方・設計判断は `docs/IMPL-*.md`（実装計画）・`docs/REVIEW-codex-*.md`（レビュー指摘）・`docs/CODE-REVIEW-*.md`（検証記録）に記録。
+- ⚠️ **ハマりポイント・引き継ぎは [`docs/HANDOVER.md`](docs/HANDOVER.md)**（テスト/並行制御/GLM委託/Docker運用などの非自明な罠。新しくハマったら必ず追記）。
 
 ---
 
