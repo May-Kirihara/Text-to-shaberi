@@ -1,0 +1,126 @@
+<!--
+  Text-to-shaberi 配信字幕オーバーレイ — VTuber風 切り替わりプリセット
+  ================================================================
+
+  index.html（既定フェード式）との違い:
+    - フェードアウトしない / 消えない — 直近の非空テキストを保持し続ける
+    - テキスト変更は瞬時（opacity フェードなし）
+    - 切替時に軽い pop アニメ（--pop-ms: 0 で無効化）
+    - 任意の背景ボックス（--box-bg に色を入れると角丸パネル表示）
+
+  使い方:
+    client.toml で [caption].template = "vtuber" を指定。
+    OBS ブラウザソースの URL は http://127.0.0.1:8772/（GET / がこのプリセットを返す）
+
+  CSS 変数一覧:
+    --font          フォント
+    --size          文字サイズ
+    --color         文字色
+    --stroke-color  縁取り色
+    --stroke-width  縁取り太さ
+    --shadow        text-shadow
+    --align         水平位置 (center / left / right)
+    --valign        垂直位置 (flex-end / center / flex-start)
+    --max-width     字幕最大幅
+    --pop-ms        切替 pop アニメ時間（0 で無効）
+    --box-bg        背景ボックス色（transparent で非表示）
+    --box-radius    背景ボックス角丸
+    --box-pad       背景ボックス内余白
+-->
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --font: "Noto Sans JP", sans-serif;
+    --size: 64px;
+    --color: #ffffff;
+    --stroke-color: #000000;
+    --stroke-width: 6px;
+    --shadow: 0 0 8px rgba(0,0,0,.8);
+    --align: center;
+    --valign: flex-end;
+    --max-width: 90vw;
+    --pop-ms: 120ms;
+    --box-bg: transparent;
+    --box-radius: 12px;
+    --box-pad: .15em .5em;
+  }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+  }
+  #wrap {
+    display: flex;
+    height: 100%;
+    align-items: var(--valign);
+    justify-content: var(--align);
+  }
+  #cap {
+    font-family: var(--font);
+    font-size: var(--size);
+    color: var(--color);
+    -webkit-text-stroke: var(--stroke-width) var(--stroke-color);
+    paint-order: stroke fill;
+    text-shadow: var(--shadow);
+    max-width: var(--max-width);
+    line-height: 1.3;
+    padding: var(--box-pad);
+    background: var(--box-bg);
+    border-radius: var(--box-radius);
+    white-space: pre-wrap;
+    word-break: break-word;
+    transform: translate(0, 0);
+  }
+  @keyframes pop {
+    from { transform: scale(.96) translateY(4px); opacity: .7; }
+    to   { transform: scale(1) translateY(0); opacity: 1; }
+  }
+  #cap.pop {
+    animation: pop var(--pop-ms) ease-out;
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><div id="cap"></div></div>
+<script>
+  var cap = document.getElementById('cap');
+  var lastSeq = -1;
+  var current = '';
+
+  function swap(text) {
+    cap.textContent = text;
+    cap.classList.remove('pop');
+    void cap.offsetWidth;
+    cap.classList.add('pop');
+  }
+
+  function apply(m) {
+    if (typeof m.seq === 'number' && m.seq < lastSeq) return;
+    lastSeq = m.seq ?? lastSeq;
+    if (m.visible && m.text) {
+      if (m.text !== current) {
+        current = m.text;
+        swap(m.text);
+      }
+    }
+  }
+
+  function connect() {
+    var url = (location.protocol === 'https:' ? 'wss://' : 'ws://')
+      + location.host + '/ws' + location.search;
+    var ws = new WebSocket(url);
+    ws.onopen = function () { lastSeq = -1; };
+    ws.onmessage = function (e) {
+      try { apply(JSON.parse(e.data)); } catch (_) {}
+    };
+    ws.onclose = function () { setTimeout(connect, 1000); };
+  }
+
+  connect();
+</script>
+</body>
+</html>

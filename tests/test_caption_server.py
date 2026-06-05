@@ -442,3 +442,36 @@ def test_origin_malformed_denied_no_crash():
         await srv.close()
 
     asyncio.run(go())
+
+
+# ── 14. テンプレート解決（既定 / プリセット名 / 明示パス / fallback） ──────
+
+
+def test_page_bytes_default_is_index_fade():
+    # 既定（template 空）は index.html（フェード式・#cap.show クラスを持つ）
+    page = CaptionServer()._page_bytes()
+    assert b"#cap.show" in page
+
+
+def test_page_bytes_vtuber_preset():
+    # template="vtuber" → 同梱 caption/vtuber.html（pop アニメ・フェードなし）
+    page = CaptionServer(template="vtuber")._page_bytes()
+    assert b"--pop-ms" in page
+    assert b"#cap.show" not in page  # フェード式ではない
+
+
+def test_page_bytes_vtuber_preset_with_html_suffix():
+    page = CaptionServer(template="vtuber.html")._page_bytes()
+    assert b"--pop-ms" in page
+
+
+def test_page_bytes_unknown_preset_falls_back_to_default():
+    page = CaptionServer(template="does-not-exist-xyz")._page_bytes()
+    assert b"#cap.show" in page  # 解決不能 → default(index) へ fallback
+
+
+def test_page_bytes_explicit_file_path(tmp_path):
+    f = tmp_path / "mycap.html"
+    f.write_bytes(b"<!doctype html><body>MY CUSTOM CAPTION</body>")
+    page = CaptionServer(template=str(f))._page_bytes()
+    assert page == b"<!doctype html><body>MY CUSTOM CAPTION</body>"

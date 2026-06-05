@@ -255,21 +255,35 @@ class CaptionServer:
 
     def _page_bytes(self) -> bytes:
         if self._template:
+            # 1) 実在するファイルパス（ユーザーの独自HTML）を最優先で読む。
             try:
-                return Path(self._template).read_bytes()
+                p = Path(self._template)
+                if p.is_file():
+                    return p.read_bytes()
             except Exception:
-                self._log("[caption] template 読み込み失敗、fallback")
+                pass
+            # 2) 同梱プリセット名として解決（例: "vtuber" → caption/vtuber.html）。
+            #    ベース名のみ許可＝ディレクトリトラバーサル防止。
+            base = Path(self._template).name
+            name = base if base.endswith(".html") else f"{base}.html"
+            data = self._bundled(name)
+            if data is not None:
+                return data
+            self._log(f"[caption] template '{self._template}' を解決できず default にfallback")
+        data = self._bundled("index.html")
+        return data if data is not None else _INLINE_HTML
+
+    def _bundled(self, name: str) -> bytes | None:
         try:
             return (
                 _res_files("text_to_shaberi.client")
                 .joinpath("caption")
-                .joinpath("index.html")
+                .joinpath(name)
                 .read_bytes()
             )
         except Exception:
             pass
         try:
-            return (Path(__file__).parent / "caption" / "index.html").read_bytes()
+            return (Path(__file__).parent / "caption" / name).read_bytes()
         except Exception:
-            pass
-        return _INLINE_HTML
+            return None
