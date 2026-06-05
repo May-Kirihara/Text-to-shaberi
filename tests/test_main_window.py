@@ -6,8 +6,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import pytest
-
 from text_to_shaberi.client.config import ClientConfig
 from text_to_shaberi.client.ui.main_window import MainWindow
 
@@ -140,3 +138,24 @@ class TestMainWindowModeToggle:
         window = MainWindow(cfg)
         window.set_stream_mode_available(False)
         assert window.mode_button.isEnabled() is False
+
+
+class TestMainWindowCaption:
+    def test_caption_button_disabled_by_default(self, qapp):
+        window = MainWindow(ClientConfig())
+        assert window.caption_button.isEnabled() is False
+
+    def test_caption_button_enabled_when_config_enabled(self, qapp):
+        from text_to_shaberi.client.config import CaptionConfig
+
+        cfg = ClientConfig(caption=CaptionConfig(enabled=True))
+        window = MainWindow(cfg)
+        assert window.caption_button.isEnabled() is True
+
+    def test_caption_url_uses_loopback_and_port(self, qapp):
+        from text_to_shaberi.client.config import CaptionConfig
+
+        # 待受が 0.0.0.0 でもブラウザは loopback で開く・ポートは設定値
+        cfg = ClientConfig(caption=CaptionConfig(enabled=True, host="0.0.0.0", port=9100))
+        window = MainWindow(cfg)
+        assert window.caption_url() == "http://127.0.0.1:9100/"
