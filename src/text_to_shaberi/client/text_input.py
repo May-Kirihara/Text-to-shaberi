@@ -6,7 +6,9 @@ LocalInputServer（WSサーバ）は後続ステップで同ファイルに追�
 """
 from __future__ import annotations
 
+import asyncio
 import json
+from collections import deque
 from dataclasses import dataclass
 from typing import Callable
 from urllib.parse import parse_qsl, urlsplit
@@ -114,6 +116,7 @@ class LocalInputServer:
         loop=None,
         max_text: int = 20000,
         max_size: int = 65536,
+        out_max: int = 512,
     ) -> None:
         self._host = host
         self._port = port
@@ -128,6 +131,16 @@ class LocalInputServer:
         self._server = None
         self._active_conn = None
         self._closing = False
+        # 制御JSON も音声も単一 outbound キュー(deque)で順序化（§10.3）。
+        # request 起点で _audio_conn を固定し、音声/done はその conn のみへ送出（漏れ防止）。
+        # _reserved: 旧 request の音声/done 配信中は新接続を busy で拒否し宛先を奪わせない。
+        self._out_q: deque = deque()
+        self._out_max = out_max
+        self._out_event = asyncio.Event()
+        self._sender_task = None
+        self._drop_warned = False
+        self._reserved = False
+        self._audio_conn = None
 
     def _log(self, msg: str) -> None:
         if self._on_log:
@@ -141,10 +154,19 @@ class LocalInputServer:
         self._server = await websockets.serve(
             self._handle, self._host, self._port, max_size=self._max_size
         )
+        if self._sender_task is None:
+            self._sender_task = asyncio.ensure_future(self._sender())
         self._log(f"[input] ローカル入力口を起動: ws://{self._host}:{self._port}")
 
     async def close(self) -> None:
         self._closing = True
+        if self._sender_task is not None:
+            self._sender_task.cancel()
+            try:
+                await self._sender_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._sender_task = None
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
@@ -167,16 +189,76 @@ class LocalInputServer:
         except Exception:
             pass
 
+    def mark_active(self) -> None:
+        # 実際に request(stream) が開始したときに app が呼ぶ（空 text では呼ばれない）。
+        # 以後の音声/done の宛先を現 active 接続に固定し、done まで新接続を busy 拒否。
+        # 空 text で予約が立ち永久 busy 化する問題を防ぐ（codex 再レビュー）。
+        if not self._reserved and self._active_conn is not None:
+            self._reserved = True
+            self._audio_conn = self._active_conn
+            self._drop_warned = False
+
     async def notify(self, event: dict) -> None:
-        conn = self._active_conn
-        if conn is not None:
-            await self._safe_send(conn, event)
+        # 完了/エラー等は request 所有 conn(_audio_conn) へ。done で reservation 解除。
+        self._enqueue(self._audio_conn, "json", event)
+        if event.get("event") == "done":
+            self._reserved = False
+            self._audio_conn = None
+
+    def _warn_drop(self) -> None:
+        if not self._drop_warned:
+            self._drop_warned = True
+            self._log("[input] 消費が追いつかず音声フレームを破棄しています")
+
+    def _enqueue(self, conn, kind: str, payload) -> None:
+        if conn is None:
+            return
+        if len(self._out_q) >= self._out_max:
+            # 制御イベントは絶対に捨てない。まず chunk を1つ退避して空ける（§10.3 / codex）。
+            removed = False
+            for i, item in enumerate(self._out_q):
+                if item[1] == "chunk":
+                    del self._out_q[i]
+                    removed = True
+                    break
+            if kind == "chunk" and (not removed or len(self._out_q) >= self._out_max):
+                self._warn_drop()
+                return  # 音声フレームのみ drop（chunk が無いほど詰まった異常時は制御を超過許可で入れる）
+        self._out_q.append((conn, kind, payload))
+        self._out_event.set()
+
+    def send_audio(self, kind: str, payload) -> None:
+        # audio tap（loopスレッド）から同期呼び出し。request 所有 conn へ固定送出。
+        # kind: "begin"(fmt dict)/"chunk"(bytes)/"end"(None)
+        self._enqueue(self._audio_conn, kind, payload)
+
+    async def _sender(self) -> None:
+        while True:
+            while not self._out_q:
+                self._out_event.clear()
+                await self._out_event.wait()
+            conn, kind, payload = self._out_q.popleft()
+            # item はタグ付けされた宛先 conn へそのまま送る。閉じていれば例外→drop。
+            try:
+                if kind == "json":
+                    await conn.send(json.dumps(payload, ensure_ascii=False))
+                elif kind == "begin":
+                    await conn.send(
+                        json.dumps({"event": "audio_begin", "format": payload}, ensure_ascii=False)
+                    )
+                elif kind == "chunk":
+                    await conn.send(payload)
+                elif kind == "end":
+                    await conn.send(json.dumps({"event": "audio_end"}))
+            except Exception:
+                pass
 
     async def _handle(self, conn) -> None:
         if not self._authorized(conn):
             await conn.close(code=4401, reason="unauthorized")
             return
-        if self._closing or self._active_conn is not None:
+        if self._closing or self._active_conn is not None or self._reserved:
+            # _reserved: 直前 request の音声/done をまだ配信中（owner が切断済みでも）。
             await self._safe_send(conn, {"event": "error", "message": "busy"})
             await conn.close(code=4409, reason="busy")
             return
@@ -188,12 +270,14 @@ class LocalInputServer:
                     if not isinstance(msg, dict):
                         raise ValueError("not an object")
                 except (ValueError, TypeError):
-                    await self._safe_send(conn, {"event": "error", "message": "invalid json"})
+                    self._enqueue(conn, "json", {"event": "error", "message": "invalid json"})
                     continue
                 mtype = msg.get("type")
                 if mtype == "cancel":
+                    # bridge.abort() が pending 破棄＋stream 中断し、音声終了(idle)後に on_done を出す。
+                    # その done(notify) が reservation を解除するので、ここでは解除しない（codex#4）。
                     self._on_cancel()
-                    await self._safe_send(conn, {"event": "accepted"})
+                    self._enqueue(conn, "json", {"event": "accepted"})
                     continue
                 err: str | None = None
                 if "text" in msg:
@@ -207,9 +291,9 @@ class LocalInputServer:
                 if err is None and (msg.get("final") or mtype == "end"):
                     err = self._on_final()
                 if err:
-                    await self._safe_send(conn, {"event": "error", "message": err})
+                    self._enqueue(conn, "json", {"event": "error", "message": err})
                 else:
-                    await self._safe_send(conn, {"event": "accepted"})
+                    self._enqueue(conn, "json", {"event": "accepted"})
         finally:
             if self._active_conn is conn:
                 self._active_conn = None

@@ -75,6 +75,7 @@ class InputConfig:
     host: str = "127.0.0.1"
     port: int = 8770
     token: str = ""
+    forward_audio: bool = False
     seg_max_chars: int = 80
     seg_hard_max_chars: int = 160
 

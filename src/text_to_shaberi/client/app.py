@@ -139,6 +139,14 @@ def run_gui(config_path: str | Path) -> None:
     shutting_down = [False]
     mic_reconfiguring = [False]
 
+    _local_server_holder: list = [None]
+
+    def _on_audio(kind: str, payload) -> None:
+        # capture stream の復号音声を、テキスト投入元のローカル接続へ返す（§10）。
+        srv = _local_server_holder[0]
+        if srv is not None:
+            srv.send_audio(kind, payload)
+
     ws = WSClient(
         cfg.server.address,
         cfg.server.token,
@@ -159,6 +167,7 @@ def run_gui(config_path: str | Path) -> None:
         auto_reconnect=cfg.server.reconnect,
         reconnect_max_delay=cfg.server.reconnect_max_delay,
         prime_ms=cfg.output.prime_ms,
+        on_audio=_on_audio,
     )
 
     mic_holder: list = [None]
@@ -171,7 +180,6 @@ def run_gui(config_path: str | Path) -> None:
     text_segmenter = None
     text_stream_bridge = None
     local_input_server = None
-    _local_server_holder: list = [None]
 
     if cfg.input.enabled:
         text_segmenter = TextSegmenter(
@@ -197,6 +205,7 @@ def run_gui(config_path: str | Path) -> None:
             on_done=_text_on_done,
             on_error=_text_on_error,
             loop=loop,
+            capture=cfg.input.forward_audio,
         )
 
         def _text_on_text(text: str, profile):
@@ -204,7 +213,9 @@ def run_gui(config_path: str | Path) -> None:
                 return "busy: mic active"
             for ev in text_segmenter.feed(text):
                 if isinstance(ev, StreamStart):
+                    # 実際に stream が始まる時だけ予約（空 text では呼ばない）。
                     text_stream_bridge.set_profile(profile)
+                    local_input_server.mark_active()
                 text_stream_bridge.handle_event(ev)
             return None
 
@@ -214,8 +225,9 @@ def run_gui(config_path: str | Path) -> None:
             return None
 
         def _text_on_cancel() -> None:
+            # bridge.abort() が pending 破棄＋in-flight stream の ws.cancel＋idle後 on_done を担う。
             text_segmenter.reset()
-            asyncio.ensure_future(ws.cancel())
+            text_stream_bridge.abort()
 
         local_input_server = LocalInputServer(
             host=cfg.input.host,

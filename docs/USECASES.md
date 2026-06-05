@@ -52,6 +52,7 @@ LLM が生成したテキストを**クライアントのローカル WebSocket 
    host = "127.0.0.1"      # ローカル専用。非loopbackにする場合は token 必須（未設定なら自動無効化）
    port = 8770
    token = ""              # 任意の共有秘密。設定時は接続に必須
+   forward_audio = false   # true で「同じ接続に生成音声(pcm_s16le)も返す」（下記）。有効時はローカル再生を抑制
    seg_max_chars = 80      # 文分割の目安（これを超える長文は強制分割）
    seg_hard_max_chars = 160
    ```
@@ -95,6 +96,49 @@ asyncio.run(speak(["こんにちは。", "今日はいい天気ですね。", "�
 ```
 
 LLM をストリーミングで使う場合は、トークン delta をそのまま `{"text": delta}` で投げ続け、応答の最後に `{"final": true}` を送れば、クライアント側が句点で区切って順次合成します。
+
+### 音声もクライアントから受け取る（`forward_audio`）
+
+`[input].forward_audio = true` にすると、**テキストを投入した同じ接続に、生成音声（復号済み `pcm_s16le`）が返ってきます**。これにより「クライアントに入力 → クライアントから音声受信」が1接続で完結します（Opus でも復号後に返るので**消費側に Opus デコーダ不要**）。**この間クライアント自身のローカル再生は抑制**されます（純粋キャプチャ）。
+
+受信シーケンス（テキスト送信後、同じ接続に追加で届く）:
+```
+← {"event":"accepted"}
+← {"event":"audio_begin","format":{"codec":"pcm_s16le","sample_rate":N,"channels":C}}
+← (binary) pcm_s16le フレーム × N
+← {"event":"audio_end"}
+← {"event":"done"}
+```
+- `sample_rate` は Opus 経路なら 48000、PCM 経路ならプロファイル依存。`channels` は通常 1。バイナリは連結して再生（PCM なのでメッセージ境界に意味なし）。
+- テキストが空で音声が無い完了では `audio_*` は出ず、`done` のみ（消費側は `done` を終端とする）。
+
+最小サンプル（音声を WAV 保存）:
+```python
+import asyncio, json, wave, websockets
+
+async def speak_capture(text, out="out.wav", url="ws://127.0.0.1:8770"):
+    async with websockets.connect(url) as ws:
+        await ws.send(json.dumps({"text": text, "final": True}, ensure_ascii=False))
+        fmt, pcm = None, bytearray()
+        while True:
+            m = await ws.recv()
+            if isinstance(m, bytes):
+                pcm += m
+            else:
+                ev = json.loads(m)
+                if ev.get("event") == "audio_begin":
+                    fmt = ev["format"]
+                elif ev.get("event") in ("done", "error"):
+                    break
+        if fmt:
+            with wave.open(out, "wb") as w:
+                w.setnchannels(fmt["channels"]); w.setsampwidth(2)
+                w.setframerate(fmt["sample_rate"]); w.writeframes(bytes(pcm))
+
+asyncio.run(speak_capture("こんにちは、世界。"))
+```
+
+> サーバに**直接**つないで音声を受ける（クライアントを介さない）方式は [`PROTOCOL.md`](PROTOCOL.md)。`forward_audio` は「クライアントの文分割・低遅延パイプラインを使いつつ音声も取る」ためのもの。
 
 ### 低遅延のコツ（ライブ配信）
 

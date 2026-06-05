@@ -96,6 +96,7 @@ def test_input_defaults(tmp_path):
     assert cfg.input.enabled is False
     assert cfg.input.host == "127.0.0.1"
     assert cfg.input.port == 8770
+    assert cfg.input.forward_audio is False
 
 
 def test_input_nonloopback_without_token_disabled(tmp_path):
@@ -118,3 +119,13 @@ seg_hard_max_chars = 40
 """)
     cfg = load_client_config(str(p))
     assert cfg.input.seg_hard_max_chars >= cfg.input.seg_max_chars
+
+
+def test_input_forward_audio(tmp_path):
+    p = tmp_path / "client.toml"
+    _write_toml(p, """
+[input]
+forward_audio = true
+""")
+    cfg = load_client_config(str(p))
+    assert cfg.input.forward_audio is True

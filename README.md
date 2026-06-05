@@ -43,6 +43,7 @@ GPU を載せた Linux サーバ（STT＋TTS）と、手元の Windows／Linux �
 
 - **STT（Qwen3-ASR）と TTS（GPT-SoVITS）はサーバ側 GPU**。GPT-SoVITS は独立プロセス（HTTP :9880）として動かし、サーバから叩きます。
 - クライアントは **マイク取得・GUI・音声再生**のみ。重い処理は持ちません（Windows でも軽量）。
+- サーバに直接つないで**合成音声ストリームを受信する外部ソフト向けの接続仕様**は [`docs/PROTOCOL.md`](docs/PROTOCOL.md)（WebSocket メッセージ／Opus・PCM フレーム形式／受信サンプル）。
 - 詳細な設計・各マイルストーン記録は `docs/`（`ARCH-v0.3-client-server.md` / `IMPL-*.md` / `CODE-REVIEW-*.md`）。
 
 ---

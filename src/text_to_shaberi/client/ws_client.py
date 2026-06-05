@@ -74,6 +74,7 @@ class WSClient:
         reconnect_base: float = 0.5,
         reconnect_max_delay: float = 30.0,
         prime_ms: int = 500,
+        on_audio: Callable[[str, Any], None] | None = None,
     ) -> None:
         self._address = address
         self._token = token
@@ -121,6 +122,9 @@ class WSClient:
         self._metric_kind: str | None = None
         self._last_stt_ms: float | None = None
         self._stream_mode: bool = False
+        self._on_audio = on_audio
+        self._capture_id: str | None = None
+        self._tap_open: bool = False
 
     def _get_loop(self) -> asyncio.AbstractEventLoop:
         if self._loop is not None:
@@ -309,22 +313,24 @@ class WSClient:
                 return
         self._reconnect_task = None
 
-    async def speak(self, text: str, profile: str | None = None) -> None:
+    async def speak(self, text: str, profile: str | None = None, capture: bool = False) -> bool:
         loop = self._loop or asyncio.get_event_loop()
 
         if not self.is_connected():
             ok = await self.connect()
             if not ok:
                 self._log("接続できません")
-                return
+                return False
 
         if self._active_id is not None:
             self._log("再生中です")
-            return
+            return False
 
         id_ = uuid.uuid4().hex
         self._active_id = id_
         self._playback_id = None
+        if capture and self._on_audio is not None:
+            self._capture_id = id_
         self._stt_auto_tts = False
         self._t_send = loop.time()
         self._first_chunk_logged = False
@@ -343,11 +349,13 @@ class WSClient:
 
         try:
             await self._send(Speak(id=id_, text=text, profile=profile_val))
+            return True
         except Exception as exc:
             self._finish_stream()
             self._state("error", str(exc))
             if not self.is_connected():
                 self._schedule_reconnect()
+            return False
 
     async def utter(self, pcm: bytes, auto_tts: bool = True, chunk_bytes: int = 32768) -> None:
         loop = self._loop or asyncio.get_event_loop()
@@ -477,7 +485,7 @@ class WSClient:
             await self._ws_send(StreamEnd(id=sid).model_dump_json())
 
     async def start_text_stream(
-        self, auto_tts: bool = True, profile: str | None = None
+        self, auto_tts: bool = True, profile: str | None = None, capture: bool = False
     ) -> str | None:
         if not self.is_connected():
             ok = await self.connect()
@@ -504,6 +512,8 @@ class WSClient:
         self._first_chunk_logged = False
         self._t_send = loop.time()
         self._state("busy")
+        if capture and self._on_audio is not None:
+            self._capture_id = stream_id
         self._metric_kind = "text_stream"
         self._last_stt_ms = None
         self._state("metrics", {
@@ -535,12 +545,13 @@ class WSClient:
                 SegText(id=sid, index=index, text=text).model_dump_json()
             )
 
-    async def end_text_stream(self) -> None:
+    async def end_text_stream(self) -> bool:
         async with self._send_lock:
             sid = self._active_id
             if sid is None or not self._stream_mode:
-                return
+                return False
             await self._ws_send(StreamEnd(id=sid).model_dump_json())
+            return True
 
     async def cancel(self) -> None:
         if self._active_id is None:
@@ -558,6 +569,24 @@ class WSClient:
 
     def is_busy(self) -> bool:
         return self._active_id is not None
+
+    def _is_capture(self) -> bool:
+        return self._capture_id is not None and self._active_id == self._capture_id
+
+    def _maybe_log_ttfa(self) -> None:
+        if self._first_chunk_logged:
+            return
+        self._first_chunk_logged = True
+        loop = self._loop or asyncio.get_event_loop()
+        if self._t_send is not None:
+            ttfa_ms = (loop.time() - self._t_send) * 1000
+            self._log(f"TTFA: {ttfa_ms:.0f} ms")
+            self._state("metrics", {
+                "kind": self._metric_kind or "speak",
+                "ttfa_ms": ttfa_ms,
+                "stt_ms": self._last_stt_ms,
+                "codec": self._ready.codec if self._ready else None,
+            })
 
     async def _send(self, model: Any) -> None:
         async with self._send_lock:
@@ -628,6 +657,13 @@ class WSClient:
         else:
             pcm = raw
 
+        # capture stream: ローカル再生せず、復号済み pcm を tap へ流す（§10.5）
+        if self._is_capture():
+            if self._on_audio is not None:
+                self._on_audio("chunk", pcm)
+            self._maybe_log_ttfa()
+            return
+
         sink = self._engine if self._engine is not None else self._sink
         ok = sink.feed(pcm)
         if not ok:
@@ -647,18 +683,7 @@ class WSClient:
             self._get_loop().create_task(_cancel_after_overload())
             return
 
-        if not self._first_chunk_logged:
-            self._first_chunk_logged = True
-            loop = self._loop or asyncio.get_event_loop()
-            if self._t_send is not None:
-                ttfa_ms = (loop.time() - self._t_send) * 1000
-                self._log(f"TTFA: {ttfa_ms:.0f} ms")
-                self._state("metrics", {
-                    "kind": self._metric_kind or "speak",
-                    "ttfa_ms": ttfa_ms,
-                    "stt_ms": self._last_stt_ms,
-                    "codec": self._ready.codec if self._ready else None,
-                })
+        self._maybe_log_ttfa()
 
     def _on_message(self, msg: Any) -> None:
         if isinstance(msg, Ready):
@@ -676,8 +701,17 @@ class WSClient:
                 fmt = msg.format
                 if fmt is None and self._ready is not None:
                     fmt = self._ready.tts
+                if fmt is None or fmt.codec not in (OPUS_CODEC_NAME, "pcm_s16le"):
+                    self._log(f"AudioBegin format 不正: {fmt}")
+                    if self._engine is not None:
+                        self._engine.abort()
+                    self._cancelling = True
+                    self._finish_stream()
+                    self._state("error", "invalid audio format")
+                    return
 
-                if fmt is not None and fmt.codec == OPUS_CODEC_NAME:
+                is_opus = fmt.codec == OPUS_CODEC_NAME
+                if is_opus:
                     expected = opus_wire_format()
                     if (
                         fmt.codec != expected.codec
@@ -687,9 +721,26 @@ class WSClient:
                         self._log("AudioBegin format が opus_wire_format と不一致")
                     self._playback_codec = OPUS_CODEC_NAME
                     self._opus_decoder = OpusStreamDecoder()
+                    decoded_sr, decoded_ch = 48000, 1
                     sink_fmt = AudioFormatPayload(
                         codec="pcm_s16le", sample_rate=48000, channels=1
                     )
+                else:
+                    self._playback_codec = "pcm_s16le"
+                    self._opus_decoder = None
+                    decoded_sr, decoded_ch = fmt.sample_rate, fmt.channels
+                    sink_fmt = fmt
+
+                if self._is_capture():
+                    # capture: ローカル再生はせず、復号後フォーマットを tap begin として通知（§10.2）
+                    self._tap_open = True
+                    if self._on_audio is not None:
+                        self._on_audio("begin", {
+                            "codec": "pcm_s16le",
+                            "sample_rate": decoded_sr,
+                            "channels": decoded_ch,
+                        })
+                else:
                     device = self._resolve_device()
                     if self._engine is not None:
                         self._engine.begin(sink_fmt, device)
@@ -700,19 +751,6 @@ class WSClient:
                             prime_ms=self._prime_ms,
                         )
                         self._sink.begin(sink_fmt, device)
-                else:
-                    self._playback_codec = "pcm_s16le"
-                    self._opus_decoder = None
-                    device = self._resolve_device()
-                    if self._engine is not None:
-                        self._engine.begin(fmt, device)
-                    else:
-                        self._sink = self._sink_factory(
-                            loop=self._loop,
-                            on_log=self._on_log,
-                            prime_ms=self._prime_ms,
-                        )
-                        self._sink.begin(fmt, device)
             else:
                 self._log(f"side-band audio_begin (id={msg.id})")
             return
@@ -744,7 +782,8 @@ class WSClient:
 
         if isinstance(msg, AudioEnd):
             if msg.id == self._playback_id:
-                if self._cancelling:
+                if self._cancelling or self._is_capture():
+                    # capture は engine 未 begin。tap end は _finish_stream が出す（§10.2）。
                     self._finish_stream()
                 else:
                     if self._engine is not None:
@@ -793,6 +832,12 @@ class WSClient:
         self._log(f"無視: {getattr(msg, 'type', '?')}")
 
     def _finish_stream(self) -> None:
+        # capture stream の音声終端を全終了経路で1回だけ通知（§10.2）。
+        if self._tap_open:
+            self._tap_open = False
+            if self._on_audio is not None:
+                self._on_audio("end", None)
+        self._capture_id = None
         self._sink = None
         self._active_id = None
         self._playback_id = None
