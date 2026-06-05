@@ -99,6 +99,8 @@ class StreamBegin(BaseModel):
     id: str = ""
     format: AudioFormatPayload = AudioFormatPayload()
     auto_tts: bool = True
+    mode: Literal["audio", "text"] = "audio"
+    profile: str | None = None
 
 
 class SegBegin(BaseModel):
@@ -113,6 +115,13 @@ class SegEnd(BaseModel):
     type: Literal["seg_end"] = "seg_end"
     id: str = ""
     index: int = 0
+
+
+class SegText(BaseModel):
+    type: Literal["seg_text"] = "seg_text"
+    id: str = ""
+    index: int = 0
+    text: str = ""
 
 
 class StreamEnd(BaseModel):
@@ -140,6 +149,7 @@ _MESSAGE_TYPES: dict[str, type[BaseModel]] = {
     "stream_begin": StreamBegin,
     "seg_begin": SegBegin,
     "seg_end": SegEnd,
+    "seg_text": SegText,
     "stream_end": StreamEnd,
     "stream_stopped": StreamStopped,
 }

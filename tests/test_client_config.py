@@ -68,3 +68,64 @@ def test_defaults(tmp_path):
     assert cfg.mic.vad.seg_min_ms == 400
     assert cfg.mic.vad.seg_max_ms == 2500
     assert cfg.mic.stream_mode is False
+
+
+def test_input_config_from_toml(tmp_path):
+    p = tmp_path / "client.toml"
+    _write_toml(p, """
+[input]
+enabled = true
+host = "127.0.0.1"
+port = 8771
+token = "sek"
+seg_max_chars = 60
+seg_hard_max_chars = 120
+""")
+    cfg = load_client_config(str(p))
+    assert cfg.input.enabled is True
+    assert cfg.input.port == 8771
+    assert cfg.input.token == "sek"
+    assert cfg.input.seg_max_chars == 60
+    assert cfg.input.seg_hard_max_chars == 120
+
+
+def test_input_defaults(tmp_path):
+    p = tmp_path / "client.toml"
+    _write_toml(p, "")
+    cfg = load_client_config(str(p))
+    assert cfg.input.enabled is False
+    assert cfg.input.host == "127.0.0.1"
+    assert cfg.input.port == 8770
+    assert cfg.input.forward_audio is False
+
+
+def test_input_nonloopback_without_token_disabled(tmp_path):
+    p = tmp_path / "client.toml"
+    _write_toml(p, """
+[input]
+enabled = true
+host = "0.0.0.0"
+""")
+    cfg = load_client_config(str(p))
+    assert cfg.input.enabled is False
+
+
+def test_input_hard_max_clamp(tmp_path):
+    p = tmp_path / "client.toml"
+    _write_toml(p, """
+[input]
+seg_max_chars = 100
+seg_hard_max_chars = 40
+""")
+    cfg = load_client_config(str(p))
+    assert cfg.input.seg_hard_max_chars >= cfg.input.seg_max_chars
+
+
+def test_input_forward_audio(tmp_path):
+    p = tmp_path / "client.toml"
+    _write_toml(p, """
+[input]
+forward_audio = true
+""")
+    cfg = load_client_config(str(p))
+    assert cfg.input.forward_audio is True

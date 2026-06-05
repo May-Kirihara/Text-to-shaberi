@@ -34,6 +34,7 @@ from ..common.protocol import (
     Ready,
     SegBegin,
     SegEnd,
+    SegText,
     Speak,
     StreamBegin,
     StreamEnd,
@@ -234,7 +235,7 @@ class Session:
             tts=fmt,
             profiles=self.state.available_profiles,
             limits=limits,
-            features={"auto_tts": True, "speak_stream": True},
+            features={"auto_tts": True, "speak_stream": True, "text_stream": True},
         )
         await self._send_model(ready)
         self._handshake_done = True
@@ -276,6 +277,8 @@ class Session:
                 await self._handle_seg_begin(parsed)
             elif isinstance(parsed, SegEnd):
                 await self._handle_seg_end(parsed)
+            elif isinstance(parsed, SegText):
+                await self._handle_seg_text(parsed)
             elif isinstance(parsed, StreamEnd):
                 await self._handle_stream_end(parsed)
             elif isinstance(parsed, Cancel):
@@ -537,14 +540,18 @@ class Session:
         from .config import ServerConfig
 
         cfg: ServerConfig = self.state.config
+        profile_name = msg.profile or cfg.tts.active_profile
         try:
-            profile = load_profile(self.state.profiles_dir, cfg.tts.active_profile)
+            profile = load_profile(self.state.profiles_dir, profile_name)
         except Exception as exc:
             await self._send_model(
-                ErrorMsg(id=msg.id, message=f"failed to load profile: {exc}")
+                ErrorMsg(id=msg.id, message=f"failed to load profile '{profile_name}': {exc}")
             )
             return
-        sess = StreamSession(self, msg.id, msg.format, msg.auto_tts, profile)
+        sess = StreamSession(
+            self, msg.id, msg.format, msg.auto_tts, profile,
+            text_mode=(msg.mode == "text"),
+        )
         self.active_stream_session = sess
         sess.start()
 
@@ -565,6 +572,15 @@ class Session:
             )
             return
         s.close_segment(msg.index)
+
+    async def _handle_seg_text(self, msg: SegText) -> None:
+        s = self.active_stream_session
+        if s is None or msg.id != s.stream_id or not s.text_mode:
+            await self._send_model(
+                ErrorMsg(id=msg.id, message="no active text stream")
+            )
+            return
+        s.feed_text(msg.index, msg.text)
 
     async def _handle_stream_end(self, msg: StreamEnd) -> None:
         s = self.active_stream_session
@@ -607,12 +623,14 @@ class StreamSession:
         fmt: AudioFormatPayload,
         auto_tts: bool,
         profile: TTSProfile,
+        text_mode: bool = False,
     ) -> None:
         self.session = session
         self.stream_id = stream_id
         self.fmt = fmt
         self.auto_tts = auto_tts
         self.profile = profile
+        self.text_mode = text_mode
         self._seg_in_q: asyncio.Queue = asyncio.Queue()
         self._text_q: asyncio.Queue = asyncio.Queue()
         self._cur_index: int | None = None
@@ -623,10 +641,17 @@ class StreamSession:
         self._tasks: list[asyncio.Task] = []
 
     def start(self) -> None:
-        self._tasks = [
-            asyncio.create_task(self._stt_worker()),
-            asyncio.create_task(self._gen_output_worker()),
-        ]
+        if self.text_mode:
+            self._tasks = [asyncio.create_task(self._gen_output_worker())]
+        else:
+            self._tasks = [
+                asyncio.create_task(self._stt_worker()),
+                asyncio.create_task(self._gen_output_worker()),
+            ]
+
+    def feed_text(self, index: int, text: str) -> None:
+        if self.auto_tts and text.strip():
+            self._text_q.put_nowait((index, text))
 
     def done(self) -> bool:
         return bool(self._tasks) and all(t.done() for t in self._tasks)
@@ -647,7 +672,10 @@ class StreamSession:
         self._cur_index = None
 
     def mark_end(self) -> None:
-        self._seg_in_q.put_nowait(_SEG_END)
+        if self.text_mode:
+            self._text_q.put_nowait(_SEG_END)
+        else:
+            self._seg_in_q.put_nowait(_SEG_END)
 
     # --- STT ワーカ（1固定・cancelled フラグで遅延結果破棄）---
     async def _stt_worker(self) -> None:
@@ -740,9 +768,10 @@ class StreamSession:
                         await self.session._send_bytes(chunk)
                 if self._cancelled:
                     break
-            # 正常終端
-            if self._audio_begun and not self._cancelled:
-                if use_opus and enc is not None:
+            # 正常終端: 音声があれば flush。音声ゼロでも必ず AudioEnd を送り、
+            # クライアントが _active_id を解放して idle 復帰できるようにする(§14.1)。
+            if not self._cancelled:
+                if self._audio_begun and use_opus and enc is not None:
                     for pkt in enc.flush():
                         await self.session._send_bytes(pkt)
                 await self.session._send_model(AudioEnd(id=self.stream_id))

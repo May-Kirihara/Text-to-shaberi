@@ -70,12 +70,24 @@ class ProfileConfig:
 
 
 @dataclass(slots=True)
+class InputConfig:
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 8770
+    token: str = ""
+    forward_audio: bool = False
+    seg_max_chars: int = 80
+    seg_hard_max_chars: int = 160
+
+
+@dataclass(slots=True)
 class ClientConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     mic: MicConfig = field(default_factory=MicConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     profile: ProfileConfig = field(default_factory=ProfileConfig)
+    input: InputConfig = field(default_factory=InputConfig)
 
 
 def load_client_config(path: str | Any) -> ClientConfig:
@@ -83,6 +95,7 @@ def load_client_config(path: str | Any) -> ClientConfig:
     mic_raw = raw.get("mic") or {}
     preprocess_raw = mic_raw.get("preprocess") or {}
     vad_raw = mic_raw.get("vad") or {}
+    input_raw = raw.get("input") or {}
     cfg = ClientConfig(
         server=ServerConfig(**_only(raw.get("server") or {}, ServerConfig)),
         output=OutputConfig(**_only(raw.get("output") or {}, OutputConfig)),
@@ -98,6 +111,7 @@ def load_client_config(path: str | Any) -> ClientConfig:
         ),
         ui=UIConfig(**_only(raw.get("ui") or {}, UIConfig)),
         profile=ProfileConfig(**_only(raw.get("profile") or {}, ProfileConfig)),
+        input=InputConfig(**_only(input_raw, InputConfig)),
     )
 
     vad = cfg.mic.vad
@@ -119,4 +133,15 @@ def load_client_config(path: str | Any) -> ClientConfig:
             f"end_silence_ms={vad.end_silence_ms}, seg_max_ms={vad.seg_max_ms}",
             file=sys.stderr,
         )
+
+    inp = cfg.input
+    if inp.host not in ("127.0.0.1", "::1", "localhost") and not inp.token:
+        print(
+            f"[config] input.host={inp.host} は非loopbackですが token 未設定 "
+            f"→ 入力口を無効化します(enabled=False)",
+            file=sys.stderr,
+        )
+        inp.enabled = False
+    if inp.seg_hard_max_chars < inp.seg_max_chars:
+        inp.seg_hard_max_chars = inp.seg_max_chars
     return cfg
