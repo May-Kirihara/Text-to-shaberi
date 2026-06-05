@@ -3,10 +3,11 @@
   ================================================================
 
   index.html（既定フェード式）との違い:
-    - フェードアウトしない / 消えない — 直近の非空テキストを保持し続ける
-    - テキスト変更は瞬時（opacity フェードなし）
-    - 切替時に軽い pop アニメ（--pop-ms: 0 で無効化）
+    - フェードしない — 表示も消去も瞬時（カット）
+    - 発話に同期: 鳴り始めで表示し、発話が終わった瞬間に消える（途切れたら残らない）
+    - テキスト変更は瞬時。切替時に軽い pop アニメ（--pop-ms: 0 で無効化）
     - 任意の背景ボックス（--box-bg に色を入れると角丸パネル表示）
+    - HOLD（下の script）を true にすると、発話が途切れても直近の行を保持（消えない）
 
   使い方:
     client.toml で [caption].template = "vtuber" を指定。
@@ -73,11 +74,12 @@
     border-radius: var(--box-radius);
     white-space: pre-wrap;
     word-break: break-word;
-    transform: translate(0, 0);
+    opacity: 0;            /* 既定は隠す。テキストが来たら .on で即表示（transition なし＝カット） */
   }
+  #cap.on { opacity: 1; }
   @keyframes pop {
-    from { transform: scale(.96) translateY(4px); opacity: .7; }
-    to   { transform: scale(1) translateY(0); opacity: 1; }
+    from { transform: scale(.96) translateY(4px); }
+    to   { transform: scale(1) translateY(0); }
   }
   #cap.pop {
     animation: pop var(--pop-ms) ease-out;
@@ -87,26 +89,41 @@
 <body>
 <div id="wrap"><div id="cap"></div></div>
 <script>
+  // HOLD = true にすると、発話が途切れても直近の行を保持（消えない）。
+  // 既定 false = 発話が終わった瞬間に消す。
+  var HOLD = false;
+
   var cap = document.getElementById('cap');
   var lastSeq = -1;
   var current = '';
 
-  function swap(text) {
+  function show(text) {
     cap.textContent = text;
+    cap.classList.add('on');
     cap.classList.remove('pop');
-    void cap.offsetWidth;
+    void cap.offsetWidth;       // reflow して pop アニメを毎回再生
     cap.classList.add('pop');
+  }
+
+  function hide() {
+    cap.classList.remove('on');
+    cap.classList.remove('pop');
+    cap.textContent = '';
+    current = '';
   }
 
   function apply(m) {
     if (typeof m.seq === 'number' && m.seq < lastSeq) return;
     lastSeq = m.seq ?? lastSeq;
     if (m.visible && m.text) {
-      if (m.text !== current) {
+      if (m.text !== current) {   // 同じ文の連続更新では pop し直さない
         current = m.text;
-        swap(m.text);
+        show(m.text);
       }
+    } else if (!m.visible && !HOLD) {
+      hide();                     // 発話終了(visible:false)で瞬時に消す
     }
+    // 空テキストの show は無視（text-stream の AudioBegin 直後の一瞬の空表示を防ぐ）
   }
 
   function connect() {
