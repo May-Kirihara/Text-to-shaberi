@@ -129,3 +129,48 @@ forward_audio = true
 """)
     cfg = load_client_config(str(p))
     assert cfg.input.forward_audio is True
+
+
+def test_monitor_defaults(tmp_path):
+    p = tmp_path / "client.toml"
+    _write_toml(p, "")
+    cfg = load_client_config(str(p))
+    assert cfg.monitor.enabled is False
+    assert cfg.monitor.host == "127.0.0.1"
+    assert cfg.monitor.port == 8771
+    assert cfg.monitor.queue_max == 256
+
+
+def test_monitor_config_from_toml(tmp_path):
+    p = tmp_path / "client.toml"
+    _write_toml(p, """
+[monitor]
+enabled = true
+port = 9001
+queue_max = 64
+""")
+    cfg = load_client_config(str(p))
+    assert cfg.monitor.enabled is True
+    assert cfg.monitor.port == 9001
+    assert cfg.monitor.queue_max == 64
+
+
+def test_monitor_nonloopback_without_token_disabled(tmp_path):
+    p = tmp_path / "client.toml"
+    _write_toml(p, """
+[monitor]
+enabled = true
+host = "0.0.0.0"
+""")
+    cfg = load_client_config(str(p))
+    assert cfg.monitor.enabled is False
+
+
+def test_monitor_queue_max_clamp(tmp_path):
+    p = tmp_path / "client.toml"
+    _write_toml(p, """
+[monitor]
+queue_max = 0
+""")
+    cfg = load_client_config(str(p))
+    assert cfg.monitor.queue_max == 1

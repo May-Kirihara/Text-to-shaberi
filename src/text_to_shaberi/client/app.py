@@ -113,6 +113,7 @@ def run_gui(config_path: str | Path) -> None:
     from .ws_client import WSClient
     from .stream_bridge import StreamBridge
     from .text_stream_bridge import TextStreamBridge
+    from .audio_monitor import AudioMonitorServer
     from .text_input import LocalInputServer, TextSegmenter
     from .audio.vad import StreamStart
     from .settings_store import update_client_toml
@@ -140,12 +141,19 @@ def run_gui(config_path: str | Path) -> None:
     mic_reconfiguring = [False]
 
     _local_server_holder: list = [None]
+    _monitor_server_holder: list = [None]
 
     def _on_audio(kind: str, payload) -> None:
         # capture stream の復号音声を、テキスト投入元のローカル接続へ返す（§10）。
         srv = _local_server_holder[0]
         if srv is not None:
             srv.send_audio(kind, payload)
+
+    def _on_monitor(kind: str, payload) -> None:
+        # 全合成音声を音声モニタの全購読者へ broadcast（口パク等の外部エンジン向け）。
+        srv = _monitor_server_holder[0]
+        if srv is not None:
+            srv.broadcast(kind, payload)
 
     ws = WSClient(
         cfg.server.address,
@@ -168,6 +176,7 @@ def run_gui(config_path: str | Path) -> None:
         reconnect_max_delay=cfg.server.reconnect_max_delay,
         prime_ms=cfg.output.prime_ms,
         on_audio=_on_audio,
+        on_monitor=_on_monitor,
     )
 
     mic_holder: list = [None]
@@ -180,6 +189,7 @@ def run_gui(config_path: str | Path) -> None:
     text_segmenter = None
     text_stream_bridge = None
     local_input_server = None
+    monitor_server = None
 
     if cfg.input.enabled:
         text_segmenter = TextSegmenter(
@@ -240,6 +250,17 @@ def run_gui(config_path: str | Path) -> None:
             loop=loop,
         )
         _local_server_holder[0] = local_input_server
+
+    if cfg.monitor.enabled:
+        monitor_server = AudioMonitorServer(
+            host=cfg.monitor.host,
+            port=cfg.monitor.port,
+            token=cfg.monitor.token,
+            queue_max=cfg.monitor.queue_max,
+            on_log=window.log,
+            loop=loop,
+        )
+        _monitor_server_holder[0] = monitor_server
 
     def _on_state(event: str, payload: object = None) -> None:
         if event == "ready":
@@ -484,6 +505,11 @@ def run_gui(config_path: str | Path) -> None:
                 await local_input_server.start()
             except Exception as exc:
                 window.log(f"[input] 入力口の起動失敗: {exc}")
+        if monitor_server is not None:
+            try:
+                await monitor_server.start()
+            except Exception as exc:
+                window.log(f"[monitor] 音声モニタの起動失敗: {exc}")
 
     asyncio.ensure_future(_startup())
 
@@ -494,6 +520,8 @@ def run_gui(config_path: str | Path) -> None:
         await stream_bridge.close()
         if local_input_server is not None:
             await local_input_server.close()
+        if monitor_server is not None:
+            await monitor_server.close()
         if text_stream_bridge is not None:
             await text_stream_bridge.close()
         await ws.close()

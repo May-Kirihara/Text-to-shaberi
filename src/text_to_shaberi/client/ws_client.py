@@ -75,6 +75,7 @@ class WSClient:
         reconnect_max_delay: float = 30.0,
         prime_ms: int = 500,
         on_audio: Callable[[str, Any], None] | None = None,
+        on_monitor: Callable[[str, Any], None] | None = None,
     ) -> None:
         self._address = address
         self._token = token
@@ -125,6 +126,9 @@ class WSClient:
         self._on_audio = on_audio
         self._capture_id: str | None = None
         self._tap_open: bool = False
+        # monitor tee: 全合成音声を broadcast（capture/通常を問わず）。best-effort。
+        self._on_monitor = on_monitor
+        self._monitor_open: bool = False
 
     def _get_loop(self) -> asyncio.AbstractEventLoop:
         if self._loop is not None:
@@ -573,6 +577,16 @@ class WSClient:
     def _is_capture(self) -> bool:
         return self._capture_id is not None and self._active_id == self._capture_id
 
+    def _emit_monitor(self, kind: str, payload: Any) -> None:
+        # 全合成音声の broadcast tee。recv loop 上で呼ぶため、callback/broadcast の
+        # 例外は再生・受信ループへ漏らさず握る（best-effort tee・codex MED3）。
+        if self._on_monitor is None:
+            return
+        try:
+            self._on_monitor(kind, payload)
+        except Exception:
+            self._log("monitor emit 失敗")
+
     def _maybe_log_ttfa(self) -> None:
         if self._first_chunk_logged:
             return
@@ -657,6 +671,9 @@ class WSClient:
         else:
             pcm = raw
 
+        # monitor tee: 全ストリームの復号 pcm を broadcast（capture/通常を問わず）。
+        self._emit_monitor("chunk", pcm)
+
         # capture stream: ローカル再生せず、復号済み pcm を tap へ流す（§10.5）
         if self._is_capture():
             if self._on_audio is not None:
@@ -695,6 +712,7 @@ class WSClient:
             if (
                 not self._cancelling
                 and self._active_id is not None
+                and self._playback_id is None  # 二重 begin は side-band 扱い（monitor framing 保護）
                 and (msg.id == self._active_id or msg.parent_id == self._active_id)
             ):
                 self._playback_id = msg.id
@@ -730,6 +748,14 @@ class WSClient:
                     self._opus_decoder = None
                     decoded_sr, decoded_ch = fmt.sample_rate, fmt.channels
                     sink_fmt = fmt
+
+                # monitor tee: 全ストリームの復号後フォーマットを broadcast（capture/通常を問わず）。
+                self._monitor_open = True
+                self._emit_monitor("begin", {
+                    "codec": "pcm_s16le",
+                    "sample_rate": decoded_sr,
+                    "channels": decoded_ch,
+                })
 
                 if self._is_capture():
                     # capture: ローカル再生はせず、復号後フォーマットを tap begin として通知（§10.2）
@@ -832,6 +858,10 @@ class WSClient:
         self._log(f"無視: {getattr(msg, 'type', '?')}")
 
     def _finish_stream(self) -> None:
+        # monitor tee の音声終端を全終了経路で1回だけ broadcast（begin 未発火なら出さない）。
+        if self._monitor_open:
+            self._monitor_open = False
+            self._emit_monitor("end", None)
         # capture stream の音声終端を全終了経路で1回だけ通知（§10.2）。
         if self._tap_open:
             self._tap_open = False

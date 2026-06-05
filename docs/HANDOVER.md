@@ -35,6 +35,7 @@
 - **宛先 pin**：音声/完了通知の宛先は『その時点の最新 active 接続』ではなく『**request を起こした接続**』に固定し、**完了まで新接続を busy 拒否**する。これで late audio の漏れを構造的に排除。
 - **bounded queue は制御イベントを落とさない**：満杯時に最古を無条件 drop すると `begin/end/done` が消える。**chunk(データ)だけ drop**し、制御は超過許容で必ず入れる（`deque` で chunk を選んで退避）。
 - **判断軸**：reservation+abort のような状態機械で**角(エッジ)が3ラウンド以上続く**なら、潰し続ける前に**設計簡素化**（状態数を減らす再設計）を選択肢としてユーザーに出す。
+- **broadcast tee（音声モニタ）の落とし穴**：全購読者へ配る tee は loop スレッド**同期・await 無し**で `list(subs)` を回し iteration 競合を避ける。bounded queue は forward_audio と同じく chunk のみ drop だが、**単一 pin 接続と違い「制御イベント(begin/end)を超過許可で必ず入れる」はNG**——死/停滞購読者で begin/end が無限蓄積し**購読者単位メモリリーク**になる。退避する chunk が無い（=全く drain していない）購読者は**切断**する（framing 保証 or 接続終了）。tee の callback 例外は**握って再生/recv ループへ漏らさない**（best-effort）。emit する側（ws_client）はキャンセル経路の単一終端 `_finish_stream` で end を1回。
 
 ## 3. GLM 委託（外部LLMへの実装委託 / `mcp__secondopinion__delegate_task`）
 
@@ -66,6 +67,7 @@
 - **VAD/音声分割は必ずクライアント側**（無負荷・将来スマホ化想定）。サーバは STT/TTS のみ。
 - speak_stream / text-stream / forward_audio は**同じ `active_stream_session` スロットを共有** → mic と LLM入力は**同時併用不可**（busy で弾く仕様）。
 - 音声ワイヤ形式：**Opus は 1 バイナリWSメッセージ = 1 パケット**（48kHz mono / 20ms / 960サンプル、長さ前置きなし、連結デコード禁止）。PCM はメッセージ境界を無視して連結（s16le）。詳細は [`PROTOCOL.md`](PROTOCOL.md)。
+- クライアントのローカル口は**2つ**：入力口 `[input]`(8770, テキスト投入・forward_audio で同接続に音声返却・**単一接続+reservation**)と、音声モニタ `[monitor]`(8771, 全合成音声の **broadcast**・受信専用・複数接続・reservation 無し)。役割と並行ロジックが別物なので**混ぜない**。
 
 ---
 
