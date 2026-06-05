@@ -16,11 +16,13 @@ device   = "default"             # "default" | デバイス名の一部 | index
 resample = "auto"                # 出力デバイスrateへ soxr 変換
 prime_ms = 0                    # 再生開始時の無音prime(ms)。engine が warm 維持するため通常 0。
                                  # legacy/StreamingPlayer 単体経路用。HDMI/Bluetooth等は要大きめ。0で無効。
+muted    = false                 # true で起動時からローカル再生をミュート（モニタ/forward_audio は継続）
 
 [mic]
 device      = "default"
 sample_rate = 16000
 channels    = 1
+stream_mode = false              # true で「喋りながら順次TTS」(サーバが speak_stream 対応時のみ)
 [mic.preprocess]
 gate           = true            # 軽量ノイズゲート（MVP既定ON）
 denoise        = "off"           # off | rnnoise | noisereduce
@@ -43,3 +45,34 @@ input_method = "ibus"
 
 [profile]
 active_id = ""                   # TTS プロファイル ID。空=サーバ既定
+
+# ── オプション機能（既定は無効。使うときだけ enabled=true に）──────────────
+# いずれもローカル(127.0.0.1)待受。非loopback host にする場合は token 必須
+# （未設定だと安全のため自動で無効化される）。詳細は docs/USECASES.md。
+
+[input]
+# ローカルWS入力口: 外部(LLM等)からテキストを投入して喋らせる + forward_audio で音声受信
+enabled            = false
+host               = "127.0.0.1"
+port               = 8770
+token              = ""
+forward_audio      = false       # true で同一接続に合成音声(pcm_s16le)も返す
+seg_max_chars      = 80          # 文分割の目安長
+seg_hard_max_chars = 160         # 句点が来ない時の強制分割長
+
+[monitor]
+# 音声モニタ: 全合成音声を専用WSへ broadcast（口パク等の外部エンジン向け・受信専用）
+enabled   = false
+host      = "127.0.0.1"
+port      = 8771
+token     = ""
+queue_max = 256                  # 購読者ごとのバッファ（超過時は音声フレームのみ間引き）
+
+[caption]
+# 配信字幕オーバーレイ: OBS のブラウザソースに http://127.0.0.1:8772/ を貼る（透過字幕）
+enabled   = false
+host      = "127.0.0.1"
+port      = 8772
+token     = ""
+template  = ""                   # 独自字幕HTMLの絶対パス（空=同梱デフォルト）
+max_chars = 200                  # 蓄積字幕の最大長（超過時は末尾優先で切詰め）

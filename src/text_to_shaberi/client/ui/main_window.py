@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -30,6 +32,11 @@ _MUTE_LABEL_ON = "🔇"
 _MUTE_LABEL_OFF = "🔊"
 _MUTE_ACCESSIBLE_NAME = "スピーカーミュート"
 _MUTE_TOOLTIP = "スピーカー出力のミュート（音声モニタ・forward_audio は継続）"
+
+_CAPTION_LABEL = "📺字幕"
+_CAPTION_ACCESSIBLE_NAME = "配信字幕オーバーレイ"
+_CAPTION_TOOLTIP_ON = "配信字幕オーバーレイをブラウザで開く（OBSブラウザソース用）"
+_CAPTION_TOOLTIP_OFF = "client.toml の [caption] enabled=true で有効化"
 
 
 class MainWindow(QMainWindow):
@@ -92,6 +99,17 @@ class MainWindow(QMainWindow):
         self.mute_button.setFixedWidth(56)
         self.mute_button.toggled.connect(self._handle_mute_toggle)
 
+        self.caption_button = QPushButton(_CAPTION_LABEL)
+        self.caption_button.setAccessibleName(_CAPTION_ACCESSIBLE_NAME)
+        self.caption_button.setFixedWidth(72)
+        _cap_cfg = getattr(config, "caption", None)
+        _cap_enabled = bool(_cap_cfg and getattr(_cap_cfg, "enabled", False))
+        self.caption_button.setEnabled(_cap_enabled)
+        self.caption_button.setToolTip(
+            _CAPTION_TOOLTIP_ON if _cap_enabled else _CAPTION_TOOLTIP_OFF
+        )
+        self.caption_button.clicked.connect(self._handle_caption_open)
+
         self.mode_button = QPushButton("発話単位")
         self.mode_button.setCheckable(True)
         self.mode_button.setFixedWidth(96)
@@ -102,6 +120,7 @@ class MainWindow(QMainWindow):
         input_row.addWidget(self.mode_button)
         input_row.addWidget(self.mic_button)
         input_row.addWidget(self.mute_button)
+        input_row.addWidget(self.caption_button)
         input_row.addWidget(self.text_input, 1)
         input_row.addWidget(self.send_button)
         input_row.addWidget(self.stop_button)
@@ -227,6 +246,26 @@ class MainWindow(QMainWindow):
         self.mute_button.setText(_MUTE_LABEL_ON if checked else _MUTE_LABEL_OFF)
         if self._on_mute_toggle is not None:
             self._on_mute_toggle(checked)
+
+    def _handle_caption_open(self) -> None:
+        # 配信字幕オーバーレイ(GET /)を既定ブラウザで開く。OBS のブラウザソースにも同URLを貼る。
+        cap = getattr(self.config, "caption", None)
+        if cap is None:
+            return
+        host = getattr(cap, "host", "127.0.0.1") or "127.0.0.1"
+        if host in ("0.0.0.0", "::", ""):
+            host = "127.0.0.1"  # 待受は全IFでもブラウザは loopback で開く
+        url = f"http://{host}:{getattr(cap, 'port', 8772)}/"
+        self.log(f"[caption] ブラウザで開く: {url}（同じURLを OBS ブラウザソースに貼れます）")
+        QDesktopServices.openUrl(QUrl(url))
+
+    def caption_url(self) -> str:
+        cap = getattr(self.config, "caption", None)
+        host = (getattr(cap, "host", "127.0.0.1") or "127.0.0.1") if cap else "127.0.0.1"
+        if host in ("0.0.0.0", "::", ""):
+            host = "127.0.0.1"
+        port = getattr(cap, "port", 8772) if cap else 8772
+        return f"http://{host}:{port}/"
 
     def set_on_mode_toggle(self, callback: Callable[[bool], None]) -> None:
         self._on_mode_toggle = callback
