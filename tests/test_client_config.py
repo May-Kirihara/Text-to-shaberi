@@ -185,3 +185,52 @@ queue_max = 0
 """)
     cfg = load_client_config(str(p))
     assert cfg.monitor.queue_max == 1
+
+
+def test_caption_defaults(tmp_path):
+    p = tmp_path / "client.toml"
+    _write_toml(p, "")
+    cfg = load_client_config(str(p))
+    assert cfg.caption.enabled is False
+    assert cfg.caption.host == "127.0.0.1"
+    assert cfg.caption.port == 8772
+    assert cfg.caption.token == ""
+    assert cfg.caption.template == ""
+    assert cfg.caption.max_chars == 200
+
+
+def test_caption_config_from_toml(tmp_path):
+    p = tmp_path / "client.toml"
+    _write_toml(p, """
+[caption]
+enabled = true
+port = 9100
+max_chars = 80
+template = "/tmp/my_caption.html"
+""")
+    cfg = load_client_config(str(p))
+    assert cfg.caption.enabled is True
+    assert cfg.caption.port == 9100
+    assert cfg.caption.max_chars == 80
+    assert cfg.caption.template == "/tmp/my_caption.html"
+
+
+def test_caption_nonloopback_without_token_disabled(tmp_path):
+    p = tmp_path / "client.toml"
+    _write_toml(p, """
+[caption]
+enabled = true
+host = "0.0.0.0"
+""")
+    cfg = load_client_config(str(p))
+    assert cfg.caption.enabled is False
+
+
+def test_caption_max_chars_clamp(tmp_path):
+    p = tmp_path / "client.toml"
+    _write_toml(p, """
+[caption]
+max_chars = 0
+""")
+    cfg = load_client_config(str(p))
+    assert cfg.caption.max_chars == 1

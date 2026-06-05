@@ -114,6 +114,7 @@ def run_gui(config_path: str | Path) -> None:
     from .stream_bridge import StreamBridge
     from .text_stream_bridge import TextStreamBridge
     from .audio_monitor import AudioMonitorServer
+    from .caption_server import CaptionServer
     from .text_input import LocalInputServer, TextSegmenter
     from .audio.vad import StreamStart
     from .settings_store import update_client_toml
@@ -142,6 +143,7 @@ def run_gui(config_path: str | Path) -> None:
 
     _local_server_holder: list = [None]
     _monitor_server_holder: list = [None]
+    _caption_server_holder: list = [None]
 
     def _on_audio(kind: str, payload) -> None:
         # capture stream の復号音声を、テキスト投入元のローカル接続へ返す（§10）。
@@ -154,6 +156,12 @@ def run_gui(config_path: str | Path) -> None:
         srv = _monitor_server_holder[0]
         if srv is not None:
             srv.broadcast(kind, payload)
+
+    def _on_caption(event: str, payload) -> None:
+        # 「今喋ってる内容」を配信字幕オーバーレイの全購読者へ broadcast。
+        srv = _caption_server_holder[0]
+        if srv is not None:
+            srv.broadcast(event, payload)
 
     ws = WSClient(
         cfg.server.address,
@@ -177,6 +185,8 @@ def run_gui(config_path: str | Path) -> None:
         prime_ms=cfg.output.prime_ms,
         on_audio=_on_audio,
         on_monitor=_on_monitor,
+        on_caption=_on_caption,
+        caption_max=cfg.caption.max_chars,
     )
 
     mic_holder: list = [None]
@@ -190,6 +200,7 @@ def run_gui(config_path: str | Path) -> None:
     text_stream_bridge = None
     local_input_server = None
     monitor_server = None
+    caption_server = None
 
     if cfg.input.enabled:
         text_segmenter = TextSegmenter(
@@ -261,6 +272,17 @@ def run_gui(config_path: str | Path) -> None:
             loop=loop,
         )
         _monitor_server_holder[0] = monitor_server
+
+    if cfg.caption.enabled:
+        caption_server = CaptionServer(
+            host=cfg.caption.host,
+            port=cfg.caption.port,
+            token=cfg.caption.token,
+            template=cfg.caption.template,
+            on_log=window.log,
+            loop=loop,
+        )
+        _caption_server_holder[0] = caption_server
 
     def _on_state(event: str, payload: object = None) -> None:
         if event == "ready":
@@ -517,6 +539,11 @@ def run_gui(config_path: str | Path) -> None:
                 await monitor_server.start()
             except Exception as exc:
                 window.log(f"[monitor] 音声モニタの起動失敗: {exc}")
+        if caption_server is not None:
+            try:
+                await caption_server.start()
+            except Exception as exc:
+                window.log(f"[caption] 字幕サーバの起動失敗: {exc}")
 
     asyncio.ensure_future(_startup())
 
@@ -527,11 +554,16 @@ def run_gui(config_path: str | Path) -> None:
         await stream_bridge.close()
         if local_input_server is not None:
             await local_input_server.close()
-        if monitor_server is not None:
-            await monitor_server.close()
         if text_stream_bridge is not None:
             await text_stream_bridge.close()
+        # ws を broadcast サーバより先に閉じる: ws teardown 中の _finish_stream が出す
+        # 最後の caption clear / monitor end を、購読サーバが開いているうちに配信させる
+        # （逆順だと閉鎖済みサーバへ送られ OBS に古字幕が残る・codex 実装レビュー#1）。
         await ws.close()
+        if monitor_server is not None:
+            await monitor_server.close()
+        if caption_server is not None:
+            await caption_server.close()
 
     def _on_quit() -> None:
         # 終了時: loop が回っている間だけ shutdown を schedule（停止後の ensure_future で落とさない）
