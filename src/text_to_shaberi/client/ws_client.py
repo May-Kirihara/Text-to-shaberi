@@ -76,6 +76,8 @@ class WSClient:
         prime_ms: int = 500,
         on_audio: Callable[[str, Any], None] | None = None,
         on_monitor: Callable[[str, Any], None] | None = None,
+        on_caption: Callable[[str, Any], None] | None = None,
+        caption_max: int = 200,
     ) -> None:
         self._address = address
         self._token = token
@@ -129,6 +131,13 @@ class WSClient:
         # monitor tee: 全合成音声を broadcast（capture/通常を問わず）。best-effort。
         self._on_monitor = on_monitor
         self._monitor_open: bool = False
+        # caption tee: 配信字幕。AudioBegin で表示・AudioEnd(_finish_stream) で消去。
+        # text-stream は音声ゲート付きで送信済みセグメントを蓄積（_caption_buf）。best-effort。
+        self._on_caption = on_caption
+        self._caption_open: bool = False
+        self._caption_buf: list[str] = []
+        self._caption_seq: int = 0
+        self._caption_max: int = max(1, caption_max)
         # ローカル再生ミュート: engine/sink の出力フレームを無音化（feed は継続。
         # monitor/forward_audio は別経路で継続）。
         self._muted: bool = False
@@ -337,6 +346,7 @@ class WSClient:
         id_ = uuid.uuid4().hex
         self._active_id = id_
         self._playback_id = None
+        self._caption_buf = [text]  # speak 全文（表示は AudioBegin で）
         if capture and self._on_audio is not None:
             self._capture_id = id_
         self._stt_auto_tts = False
@@ -439,6 +449,7 @@ class WSClient:
         self._active_id = stream_id
         self._playback_id = None
         self._stream_mode = True
+        self._caption_buf = []  # 新ストリーム開始時に字幕バッファを確実にリセット
         eff_auto = auto_tts and bool(
             self._ready and self._ready.features.get("auto_tts")
         )
@@ -512,6 +523,7 @@ class WSClient:
         self._active_id = stream_id
         self._playback_id = None
         self._stream_mode = True
+        self._caption_buf = []  # 新ストリーム開始時に字幕バッファを確実にリセット
         eff_auto = auto_tts and bool(
             self._ready and self._ready.features.get("auto_tts")
         )
@@ -552,6 +564,17 @@ class WSClient:
             await self._ws_send(
                 SegText(id=sid, index=index, text=text).model_dump_json()
             )
+            # 字幕蓄積(codex NO-GO3): _ws_send の await 中に _finish_stream が走る
+            # ことがある。送信成功後、まだ同じ stream が生きている時だけ append し、
+            # 終了済みなら捨てる（古いセグメントの次発話混入を防ぐ）。
+            if self._active_id == sid and self._stream_mode:
+                self._caption_buf.append(text)
+                joined = "".join(self._caption_buf)
+                if len(joined) > self._caption_max:
+                    joined = joined[-self._caption_max:]
+                    self._caption_buf[:] = [joined]  # 末尾優先で折りたたみ（メモリ上限化）
+                if self._caption_open:
+                    self._emit_caption(joined, True)
 
     async def end_text_stream(self) -> bool:
         async with self._send_lock:
@@ -599,6 +622,19 @@ class WSClient:
             self._on_monitor(kind, payload)
         except Exception:
             self._log("monitor emit 失敗")
+
+    def _emit_caption(self, text: str, visible: bool) -> None:
+        # 配信字幕の tee。recv loop / send タスク上で呼ぶため例外は握る（best-effort）。
+        if self._on_caption is None:
+            return
+        self._caption_seq += 1
+        try:
+            self._on_caption(
+                "caption",
+                {"text": text, "visible": visible, "seq": self._caption_seq},
+            )
+        except Exception:
+            self._log("caption emit 失敗")
 
     def _maybe_log_ttfa(self) -> None:
         if self._first_chunk_logged:
@@ -770,6 +806,11 @@ class WSClient:
                     "channels": decoded_ch,
                 })
 
+                # caption tee: 表示開始（現在の蓄積テキストを出す。capture でも出す＝
+                # 受信側が喋るので「今喋ってる内容」。monitor と同じく capture 非依存）。
+                self._caption_open = True
+                self._emit_caption("".join(self._caption_buf), True)
+
                 if self._is_capture():
                     # capture: ローカル再生はせず、復号後フォーマットを tap begin として通知（§10.2）
                     self._tap_open = True
@@ -799,9 +840,14 @@ class WSClient:
             if msg.id == self._active_id:
                 if self._stream_mode:
                     # 字幕は app 側 _on_state("transcript") が1回ログする（二重ログ回避・codex §8.7）
+                    # mic streaming の字幕は最新の認識文に差し替え（音声 open 中のみ反映）。
+                    self._caption_buf = [msg.text]
+                    if self._caption_open:
+                        self._emit_caption(msg.text, True)
                     self._state("transcript", msg.text)
                     return
                 text = msg.text
+                self._caption_buf = [text]  # 認識文（表示は後続 AudioBegin で）
                 self._log(f"🎤→ {text}")
                 self._state("transcript", text)
                 if self._t_send is not None and self._metric_kind == "utter":
@@ -876,6 +922,11 @@ class WSClient:
         if self._monitor_open:
             self._monitor_open = False
             self._emit_monitor("end", None)
+        # caption tee: 音声終端で字幕を消去（begin 未発火＝未表示なら出さない・1回だけ）。
+        if self._caption_open:
+            self._caption_open = False
+            self._emit_caption("", False)
+        self._caption_buf = []
         # capture stream の音声終端を全終了経路で1回だけ通知（§10.2）。
         if self._tap_open:
             self._tap_open = False

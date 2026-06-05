@@ -91,6 +91,16 @@ class MonitorConfig:
 
 
 @dataclass(slots=True)
+class CaptionConfig:
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 8772
+    token: str = ""
+    template: str = ""      # ユーザーHTML差し替えパス（空=同梱デフォルト）
+    max_chars: int = 200    # 蓄積字幕の最大長（超過時は末尾優先で切詰め）
+
+
+@dataclass(slots=True)
 class ClientConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
@@ -99,6 +109,7 @@ class ClientConfig:
     profile: ProfileConfig = field(default_factory=ProfileConfig)
     input: InputConfig = field(default_factory=InputConfig)
     monitor: MonitorConfig = field(default_factory=MonitorConfig)
+    caption: CaptionConfig = field(default_factory=CaptionConfig)
 
 
 def load_client_config(path: str | Any) -> ClientConfig:
@@ -124,6 +135,7 @@ def load_client_config(path: str | Any) -> ClientConfig:
         profile=ProfileConfig(**_only(raw.get("profile") or {}, ProfileConfig)),
         input=InputConfig(**_only(input_raw, InputConfig)),
         monitor=MonitorConfig(**_only(raw.get("monitor") or {}, MonitorConfig)),
+        caption=CaptionConfig(**_only(raw.get("caption") or {}, CaptionConfig)),
     )
 
     vad = cfg.mic.vad
@@ -167,4 +179,15 @@ def load_client_config(path: str | Any) -> ClientConfig:
         mon.enabled = False
     if mon.queue_max < 1:
         mon.queue_max = 1
+
+    cap = cfg.caption
+    if cap.host not in ("127.0.0.1", "::1", "localhost") and not cap.token:
+        print(
+            f"[config] caption.host={cap.host} は非loopbackですが token 未設定 "
+            f"→ 字幕オーバーレイを無効化します(enabled=False)",
+            file=sys.stderr,
+        )
+        cap.enabled = False
+    if cap.max_chars < 1:
+        cap.max_chars = 1
     return cfg
