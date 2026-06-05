@@ -107,17 +107,15 @@ class AudioMonitorServer:
     def broadcast(self, kind: str, payload: Any) -> None:
         """audio tee（loop スレッド）から同期呼び出し。await 無し＝iteration 中に
         他コルーチンが割り込まない。kind: "begin"(fmt dict)/"chunk"(bytes)/"end"(None)。"""
-        if self._closing or not self._subs:
-            # begin/end のフォーマット追跡だけは購読者ゼロでも更新（次の join 補完用）。
-            if kind == "begin":
-                self._cur_format = payload
-            elif kind == "end":
-                self._cur_format = None
-            return
+        # begin/end は購読者ゼロでも format 追跡＋診断ログ（音声が tee に届いているか可視化）。
         if kind == "begin":
             self._cur_format = payload
+            self._log(f"[monitor] broadcast begin (購読者 {len(self._subs)}) format={payload}")
         elif kind == "end":
             self._cur_format = None
+            self._log(f"[monitor] broadcast end (購読者 {len(self._subs)})")
+        if self._closing or not self._subs:
+            return
         for sub in list(self._subs.values()):
             self._enqueue(sub, kind, payload)
 
