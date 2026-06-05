@@ -34,6 +34,9 @@ class FakeEngine:
     def prewarm(self, device):
         self.records.append(("prewarm",))
 
+    def set_muted(self, muted):
+        self.records.append(("set_muted", muted))
+
     def begin(self, fmt, device):
         self.records.append(("begin",))
 

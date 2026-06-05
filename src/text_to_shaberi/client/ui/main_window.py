@@ -26,6 +26,11 @@ _MIC_LABEL_OFF = "🎤"
 _MIC_ACCESSIBLE_NAME = "マイク"
 _MIC_TOOLTIP = "マイク常時録音 ON/OFF"
 
+_MUTE_LABEL_ON = "🔇"
+_MUTE_LABEL_OFF = "🔊"
+_MUTE_ACCESSIBLE_NAME = "スピーカーミュート"
+_MUTE_TOOLTIP = "スピーカー出力のミュート（音声モニタ・forward_audio は継続）"
+
 
 class MainWindow(QMainWindow):
     def __init__(self, config, output_devices=None, on_speak: Callable[[str], None] | None = None):
@@ -36,6 +41,7 @@ class MainWindow(QMainWindow):
         self._on_settings: Callable[[], None] | None = None
         self._on_mic_toggle: Callable[[bool], None] | None = None
         self._on_mode_toggle: Callable[[bool], None] | None = None
+        self._on_mute_toggle: Callable[[bool], None] | None = None
 
         self.setWindowTitle("Text-to-shaberi")
         self.resize(680, 460)
@@ -79,6 +85,13 @@ class MainWindow(QMainWindow):
         self.mic_button.setFixedWidth(56)
         self.mic_button.toggled.connect(self._handle_mic_toggle)
 
+        self.mute_button = QPushButton(_MUTE_LABEL_OFF)
+        self.mute_button.setCheckable(True)
+        self.mute_button.setAccessibleName(_MUTE_ACCESSIBLE_NAME)
+        self.mute_button.setToolTip(_MUTE_TOOLTIP)
+        self.mute_button.setFixedWidth(56)
+        self.mute_button.toggled.connect(self._handle_mute_toggle)
+
         self.mode_button = QPushButton("発話単位")
         self.mode_button.setCheckable(True)
         self.mode_button.setFixedWidth(96)
@@ -88,6 +101,7 @@ class MainWindow(QMainWindow):
 
         input_row.addWidget(self.mode_button)
         input_row.addWidget(self.mic_button)
+        input_row.addWidget(self.mute_button)
         input_row.addWidget(self.text_input, 1)
         input_row.addWidget(self.send_button)
         input_row.addWidget(self.stop_button)
@@ -120,6 +134,16 @@ class MainWindow(QMainWindow):
 
     def set_on_mic_toggle(self, callback: Callable[[bool], None]) -> None:
         self._on_mic_toggle = callback
+
+    def set_on_mute_toggle(self, callback: Callable[[bool], None]) -> None:
+        self._on_mute_toggle = callback
+
+    def set_muted(self, muted: bool) -> None:
+        # 初期状態の反映用（toggled で _on_mute_toggle が発火しないよう blockSignals）。
+        self.mute_button.blockSignals(True)
+        self.mute_button.setChecked(muted)
+        self.mute_button.setText(_MUTE_LABEL_ON if muted else _MUTE_LABEL_OFF)
+        self.mute_button.blockSignals(False)
 
     def set_mic_active(self, active: bool) -> None:
         self.mic_button.setChecked(active)
@@ -198,6 +222,11 @@ class MainWindow(QMainWindow):
             self.mic_button.setText(_MIC_LABEL_OFF)
         if self._on_mic_toggle is not None:
             self._on_mic_toggle(checked)
+
+    def _handle_mute_toggle(self, checked: bool) -> None:
+        self.mute_button.setText(_MUTE_LABEL_ON if checked else _MUTE_LABEL_OFF)
+        if self._on_mute_toggle is not None:
+            self._on_mute_toggle(checked)
 
     def set_on_mode_toggle(self, callback: Callable[[bool], None]) -> None:
         self._on_mode_toggle = callback

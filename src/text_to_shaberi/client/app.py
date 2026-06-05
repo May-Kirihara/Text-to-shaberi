@@ -487,11 +487,18 @@ def run_gui(config_path: str | Path) -> None:
         if mic_enabled_by_user[0]:
             asyncio.ensure_future(_reconfigure_mic_async())
 
+    def on_mute_toggle(muted: bool) -> None:
+        ws.set_muted(muted)
+        window.log(f"[gui] スピーカー{'ミュート' if muted else 'ミュート解除'}")
+
     window.set_on_speak(on_speak)
     window.set_on_stop(on_stop)
     window.set_on_settings(on_settings)
     window.set_on_mic_toggle(on_mic_toggle)
     window.set_on_mode_toggle(on_mode_toggle)
+    window.set_on_mute_toggle(on_mute_toggle)
+    ws.set_muted(cfg.output.muted)
+    window.set_muted(cfg.output.muted)
     window.set_stream_mode(mic_stream_mode[0])
     window.set_stream_mode_available(False)
 

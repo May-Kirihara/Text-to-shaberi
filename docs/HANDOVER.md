@@ -36,6 +36,7 @@
 - **bounded queue は制御イベントを落とさない**：満杯時に最古を無条件 drop すると `begin/end/done` が消える。**chunk(データ)だけ drop**し、制御は超過許容で必ず入れる（`deque` で chunk を選んで退避）。
 - **判断軸**：reservation+abort のような状態機械で**角(エッジ)が3ラウンド以上続く**なら、潰し続ける前に**設計簡素化**（状態数を減らす再設計）を選択肢としてユーザーに出す。
 - **broadcast tee（音声モニタ）の落とし穴**：全購読者へ配る tee は loop スレッド**同期・await 無し**で `list(subs)` を回し iteration 競合を避ける。bounded queue は forward_audio と同じく chunk のみ drop だが、**単一 pin 接続と違い「制御イベント(begin/end)を超過許可で必ず入れる」はNG**——死/停滞購読者で begin/end が無限蓄積し**購読者単位メモリリーク**になる。退避する chunk が無い（=全く drain していない）購読者は**切断**する（framing 保証 or 接続終了）。tee の callback 例外は**握って再生/recv ループへ漏らさない**（best-effort）。emit する側（ws_client）はキャンセル経路の単一終端 `_finish_stream` で end を1回。
+- **スピーカーミュートの落とし穴**：ミュートを「`feed()` を止める」で実装すると**不十分**——engine/sink の非同期キューや `StreamingPlayer` の preroll に**投入済みの非ゼロ音声が鳴り続ける**（mid-stream/gapless で顕著）。正解は**再生 worker のデバイス write 直前でフレームを無音化**（`engine._write_chunked` / `StreamingPlayer._write`＝prime 以外の全 device write を集約）。キューは実時間で消費＝即時無音、**seq 不変なので unmute で即再開**（TVのミュート）。`feed`/`begin`/`end` は通常どおりで monitor/forward_audio/STT には波及しない。`PlaybackSink`→`StreamingPlayer` の `set_muted` 伝播は、player を **worker スレッドで生成**するため lock で『公開＋初期反映』と main の `set_muted` を**直列化**（lost update 防止）。ミュートは**選択中の出力デバイス（仮想シンク含む）**を消すので OBS 配信時は使わない。codex round-1〜4 で feed-gate→engine→preroll→lost-update の順に潰した。
 
 ## 3. GLM 委託（外部LLMへの実装委託 / `mcp__secondopinion__delegate_task`）
 

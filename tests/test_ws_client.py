@@ -47,6 +47,9 @@ class FakeSink:
         self._on_log = kwargs.get("on_log")
         self.begin_fmt = None
 
+    def set_muted(self, muted):
+        self.records.append(("set_muted", muted))
+
     def begin(self, fmt, device):
         self.begin_fmt = fmt
         self.records.append(("begin", fmt.sample_rate, device, fmt.codec))
@@ -86,6 +89,9 @@ class FakeEngine:
     def prewarm(self, device):
         self._prewarmed = True
         self.records.append(("prewarm", device))
+
+    def set_muted(self, muted):
+        self.records.append(("set_muted", muted))
 
     def begin(self, fmt, device):
         self.begin_fmt = fmt

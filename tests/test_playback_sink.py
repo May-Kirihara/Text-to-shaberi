@@ -27,6 +27,9 @@ class FakePlayer:
         self._write_block = threading.Event()
         self._write_block.set()
 
+    def set_muted(self, muted: bool) -> None:
+        self.calls.append(("set_muted", muted))
+
     def write_bytes(self, data: bytes) -> None:
         self._write_block.wait()
         self.calls.append(("write_bytes", len(data)))
@@ -46,6 +49,25 @@ class FakePlayerBlocking(FakePlayer):
 
 
 class TestPlaybackSink:
+    def test_muted_before_begin_applies_to_player(self):
+        # begin 前に set_muted(True) → worker が player 生成時に反映（_mute_lock 直列化）。
+        sink = PlaybackSink(player_factory=FakePlayer, on_log=lambda m: None)
+        sink.set_muted(True)
+        sink.begin(FakeFormat(), None)
+        time.sleep(0.05)
+        assert ("set_muted", True) in sink._player.calls
+        sink.end()
+        sink.join(timeout=2.0)
+
+    def test_set_muted_propagates_to_live_player(self):
+        sink = PlaybackSink(player_factory=FakePlayer, on_log=lambda m: None)
+        sink.begin(FakeFormat(), None)
+        time.sleep(0.05)
+        sink.set_muted(True)
+        assert ("set_muted", True) in sink._player.calls
+        sink.end()
+        sink.join(timeout=2.0)
+
     def test_end_returns_immediately(self):
         logs: list[str] = []
         sink = PlaybackSink(
@@ -145,6 +167,9 @@ class TestPlaybackSink:
         class SlowPlayer:
             def __init__(self, **kwargs):
                 self.calls = []
+
+            def set_muted(self, muted):
+                self.calls.append(("set_muted", muted))
 
             def write_bytes(self, data):
                 block_event.wait()

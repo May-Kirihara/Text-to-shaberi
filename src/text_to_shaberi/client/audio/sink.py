@@ -33,6 +33,16 @@ class PlaybackSink:
         self._q: queue.Queue[Any] = queue.Queue(maxsize=256)
         self._thread: threading.Thread | None = None
         self._aborting = False
+        self._muted: bool = False
+        self._mute_lock = threading.Lock()
+
+    def set_muted(self, muted: bool) -> None:
+        # 即時。player(StreamingPlayer)へ伝播し、デバイス出力フレームを無音化（preroll 含む）。
+        # _mute_lock で worker の player 公開/初期ミュート反映と直列化（lost update 防止）。
+        with self._mute_lock:
+            self._muted = bool(muted)
+            if self._player is not None:
+                self._player.set_muted(self._muted)
 
     def _log(self, msg: str) -> None:
         if self._on_log is None:
@@ -58,10 +68,13 @@ class PlaybackSink:
                 encoding=fmt.codec,
                 prime_ms=self._prime_ms,
             )
-            self._player = player
         except Exception as exc:
             self._log(f"[sink] player 生成失敗: {exc}")
             return
+        # 公開と初期ミュート反映を _mute_lock 下で直列化（set_muted との lost update 防止）。
+        with self._mute_lock:
+            self._player = player
+            player.set_muted(self._muted)
 
         while True:
             item = self._q.get()

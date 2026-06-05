@@ -129,6 +129,9 @@ class WSClient:
         # monitor tee: 全合成音声を broadcast（capture/通常を問わず）。best-effort。
         self._on_monitor = on_monitor
         self._monitor_open: bool = False
+        # ローカル再生ミュート: engine/sink の出力フレームを無音化（feed は継続。
+        # monitor/forward_audio は別経路で継続）。
+        self._muted: bool = False
 
     def _get_loop(self) -> asyncio.AbstractEventLoop:
         if self._loop is not None:
@@ -248,6 +251,7 @@ class WSClient:
                     self._engine = self._engine_factory(
                         loop=self._loop, on_log=self._on_log,
                     )
+                self._engine.set_muted(self._muted)
                 self._engine.prewarm(self._resolve_device())
                 return True
             except Exception as exc:
@@ -574,6 +578,15 @@ class WSClient:
     def is_busy(self) -> bool:
         return self._active_id is not None
 
+    def set_muted(self, muted: bool) -> None:
+        # ローカルスピーカー再生のミュート切替（即時）。engine/sink が出力フレームを無音化する
+        # （feed/begin/end は通常どおり。monitor/forward_audio は別経路で影響なし）。
+        self._muted = bool(muted)
+        if self._engine is not None:
+            self._engine.set_muted(self._muted)
+        if self._sink is not None:
+            self._sink.set_muted(self._muted)
+
     def _is_capture(self) -> bool:
         return self._capture_id is not None and self._active_id == self._capture_id
 
@@ -776,6 +789,7 @@ class WSClient:
                             on_log=self._on_log,
                             prime_ms=self._prime_ms,
                         )
+                        self._sink.set_muted(self._muted)
                         self._sink.begin(sink_fmt, device)
             else:
                 self._log(f"side-band audio_begin (id={msg.id})")

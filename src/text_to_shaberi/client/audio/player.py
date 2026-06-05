@@ -144,6 +144,15 @@ class StreamingPlayer:
         self._preroll: list[np.ndarray] = []
         self._preroll_frames = int(self._target_sr * preroll_ms / 1000)
         self._started_audio = False
+        # ミュート: デバイス出力フレームを無音化（preroll/tail を含む全 write 直前で適用）。
+        self._muted = False
+
+    def set_muted(self, muted: bool) -> None:
+        self._muted = bool(muted)
+
+    def _write(self, frames: np.ndarray) -> None:
+        # デバイスへの実 write。ミュート中はフレームを無音に差し替える（preroll 含め即時無音）。
+        self._stream.write(np.zeros_like(frames) if self._muted else frames)
 
     def _ensure_started(self) -> None:
         if not self._started_stream:
@@ -193,14 +202,14 @@ class StreamingPlayer:
                     self._preroll.clear()
                     self._ensure_started()
                     try:
-                        self._stream.write(combined)
+                        self._write(combined)
                     except Exception:
                         self._aborted = True
                         return
                     self._started_audio = True
             else:
                 try:
-                    self._stream.write(frames)
+                    self._write(frames)
                 except Exception:
                     self._aborted = True
                     return
@@ -248,7 +257,7 @@ class StreamingPlayer:
             if chunks:
                 self._ensure_started()
                 try:
-                    self._stream.write(np.concatenate(chunks))
+                    self._write(np.concatenate(chunks))
                 except Exception:
                     pass
 

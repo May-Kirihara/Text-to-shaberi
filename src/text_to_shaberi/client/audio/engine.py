@@ -78,6 +78,9 @@ class PlaybackEngine:
         self._carry: bytes = b""
         self._cur_fmt: Any = None
         self._play_seq: int = 0
+        # ミュート: 出力フレームを無音に差し替える（キューは実時間で消費＝即時無音・
+        # seq 不変なので unmute で即再開。worker スレッドが読み main スレッドが書く bool）。
+        self._muted: bool = False
 
     def _log(self, msg: str) -> None:
         if self._on_log is None:
@@ -180,6 +183,8 @@ class PlaybackEngine:
                     if item.seq == self._play_seq:
                         tail = self._flush_resampler()
                         if tail is not None and len(tail) > 0:
+                            if self._muted:
+                                tail = np.zeros_like(tail)
                             self._stream.write(tail)
                     continue
                 if isinstance(item, _Audio):
@@ -217,6 +222,8 @@ class PlaybackEngine:
                 break
             end = min(offset + max_write_frames, total)
             chunk = frames[offset:end]
+            if self._muted:
+                chunk = np.zeros_like(chunk)
             self._stream.write(chunk)
             offset = end
 
@@ -339,6 +346,10 @@ class PlaybackEngine:
         t = self._thread
         if t is not None:
             t.join(timeout)
+
+    def set_muted(self, muted: bool) -> None:
+        # 即時。worker は次の write からフレームを無音化する（キュー消費は継続）。
+        self._muted = bool(muted)
 
     def set_device(self, device: Any) -> None:
         with self._lock:

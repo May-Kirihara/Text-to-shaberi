@@ -15,9 +15,13 @@ _LOOP = asyncio.new_event_loop()
 class FakeSink:
     def __init__(self, **kw):
         self.fed = []
+        self._muted = False
 
     def begin(self, fmt, device):
         pass
+
+    def set_muted(self, muted):
+        self._muted = muted
 
     def feed(self, pcm):
         self.fed.append(pcm)
@@ -95,6 +99,44 @@ def test_monitor_tee_double_begin_ignored():
     ws._on_message(AudioEnd(id="s1"))
     # monitor へは begin が1回だけ（framing 保証）。
     assert [k for k, _ in rec] == ["begin", "chunk", "end"]
+
+
+def test_muted_propagates_to_sink_and_feed_continues():
+    # ミュートは sink/engine の出力側で無音化する設計。feed は継続し、monitor も継続。
+    mon = []
+    ws = _mk(lambda k, p: mon.append((k, p)))
+    ws.set_muted(True)
+    fmt = AudioFormatPayload(codec="pcm_s16le", sample_rate=24000, channels=1)
+    ws._on_message(AudioBegin(id="s1", format=fmt))
+    sink = ws._sink  # AudioBegin で生成された sink
+    assert sink._muted is True  # ミュート状態が sink へ伝播
+    ws._on_binary(b"\x01\x02")
+    assert sink.fed == [b"\x01\x02"]  # feed は継続（無音化は出力側）
+    ws._on_message(AudioEnd(id="s1"))
+    assert [k for k, _ in mon] == ["begin", "chunk", "end"]  # monitor は継続
+
+
+def test_unmuted_sink_not_muted_and_feeds():
+    ws = _mk(lambda k, p: None)
+    fmt = AudioFormatPayload(codec="pcm_s16le", sample_rate=24000, channels=1)
+    ws._on_message(AudioBegin(id="s1", format=fmt))
+    sink = ws._sink
+    assert sink._muted is False
+    ws._on_binary(b"\xab\xcd")
+    assert sink.fed == [b"\xab\xcd"]
+    ws._on_message(AudioEnd(id="s1"))
+
+
+def test_set_muted_propagates_to_live_sink():
+    # ストリーム中の set_muted は既存 sink へ即伝播する（mid-stream トグル）。
+    ws = _mk(lambda k, p: None)
+    fmt = AudioFormatPayload(codec="pcm_s16le", sample_rate=24000, channels=1)
+    ws._on_message(AudioBegin(id="s1", format=fmt))  # sink 生成
+    sink = ws._sink
+    ws.set_muted(True)
+    assert sink._muted is True  # live な sink へ即伝播
+    ws.set_muted(False)
+    assert sink._muted is False
 
 
 def test_monitor_tee_exception_swallowed():

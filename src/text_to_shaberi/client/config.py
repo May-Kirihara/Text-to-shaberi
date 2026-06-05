@@ -25,6 +25,7 @@ class OutputConfig:
     device: str = "default"
     resample: str = "auto"
     prime_ms: int = 0
+    muted: bool = False  # true で起動時からローカル再生をミュート（monitor/forward_audio は継続）
 
 
 @dataclass(slots=True)

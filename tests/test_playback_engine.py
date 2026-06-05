@@ -122,6 +122,63 @@ def _pcm_s16le_nonzero(frames: int) -> bytes:
     return (np.random.randint(-32768, 32767, size=frames, dtype="<i2")).tobytes()
 
 
+class TestMute:
+    def test_muted_writes_silence(self):
+        engine, sf, rf = _make_engine()
+        engine.prewarm(None)
+        time.sleep(0.1)
+        fmt = FakeFormat(sample_rate=48000)  # == target_sr → リサンプラ無し（実変換）
+        engine.begin(fmt, None)
+        engine.set_muted(True)
+        engine.feed(_pcm_s16le_nonzero(4800))
+        engine.end()
+        time.sleep(0.3)
+        s = sf.streams[0]
+        audio_writes = [w for w in s.writes if len(w) > 0]
+        assert audio_writes  # 何か書かれている
+        assert all(not np.any(w) for w in audio_writes)  # 全フレーム無音
+        engine.close()
+        engine.join(timeout=2.0)
+
+    def test_unmuted_writes_audio(self):
+        engine, sf, rf = _make_engine()
+        engine.prewarm(None)
+        time.sleep(0.1)
+        fmt = FakeFormat(sample_rate=48000)
+        engine.begin(fmt, None)
+        engine.feed(_pcm_s16le_nonzero(4800))
+        engine.end()
+        time.sleep(0.3)
+        s = sf.streams[0]
+        assert any(np.any(w) for w in s.writes)  # 非ミュートは非ゼロ音声を書く
+        engine.close()
+        engine.join(timeout=2.0)
+
+    def test_unmute_resumes_same_seq(self):
+        # 再生中に mute→unmute。begin 再発行なし（同一 seq）で再開できることを確認。
+        engine, sf, rf = _make_engine()
+        engine.prewarm(None)
+        time.sleep(0.1)
+        fmt = FakeFormat(sample_rate=48000)
+        engine.begin(fmt, None)
+        engine.set_muted(True)
+        engine.feed(_pcm_s16le_nonzero(2400))
+        time.sleep(0.15)
+        mid = len(sf.streams[0].writes)
+        engine.set_muted(False)
+        engine.feed(_pcm_s16le_nonzero(2400))
+        time.sleep(0.15)
+        engine.end()
+        time.sleep(0.2)
+        writes = sf.streams[0].writes
+        muted_audio = [w for w in writes[:mid] if len(w) > 0]
+        after_audio = [w for w in writes[mid:] if len(w) > 0]
+        assert muted_audio and all(not np.any(w) for w in muted_audio)  # ミュート区間は全無音
+        assert any(np.any(w) for w in after_audio)  # unmute 後は同一 seq で再開（非ゼロ）
+        engine.close()
+        engine.join(timeout=2.0)
+
+
 class TestPrewarmKeepalive:
     def test_prewarm_starts_worker_and_keepalive(self):
         logs: list[str] = []

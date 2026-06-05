@@ -25,6 +25,9 @@ class _FakeSink:
     def __init__(self, **kwargs):
         self.records = []
 
+    def set_muted(self, muted):
+        self.records.append(("set_muted", muted))
+
     def begin(self, fmt, device):
         self.records.append(("begin",))
 
@@ -55,6 +58,9 @@ class _SinkFactory:
 class _FakeEngine:
     def __init__(self, **kwargs):
         self.records = []
+
+    def set_muted(self, muted):
+        self.records.append(("set_muted", muted))
 
     def prewarm(self, device):
         self.records.append(("prewarm", device))

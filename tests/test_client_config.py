@@ -141,6 +141,17 @@ def test_monitor_defaults(tmp_path):
     assert cfg.monitor.queue_max == 256
 
 
+def test_output_muted_default_and_from_toml(tmp_path):
+    p = tmp_path / "client.toml"
+    _write_toml(p, "")
+    assert load_client_config(str(p)).output.muted is False
+    _write_toml(p, """
+[output]
+muted = true
+""")
+    assert load_client_config(str(p)).output.muted is True
+
+
 def test_monitor_config_from_toml(tmp_path):
     p = tmp_path / "client.toml"
     _write_toml(p, """

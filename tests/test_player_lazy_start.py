@@ -65,6 +65,51 @@ def _make_pcm_s16le(frames: int) -> bytes:
     return (np.random.randint(-32768, 32767, size=frames, dtype="<i2")).tobytes()
 
 
+class _RecStream(FakeStream):
+    """write されたデータ本体を保持する FakeStream（ミュート検証用）。"""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.data: list = []
+
+    def write(self, data):
+        super().write(data)
+        self.data.append(np.array(data).copy())
+
+
+def _make_player(rec):
+    return StreamingPlayer(
+        src_rate=24000,
+        channels=1,
+        encoding="pcm_s16le",
+        preroll_ms=80,
+        prime_ms=0,
+        stream_factory=lambda **kw: rec,
+        target_sr=24000,  # == src → リサンプラ無し
+    )
+
+
+class TestMute:
+    def test_muted_silences_preroll_on_close(self):
+        rec = _RecStream()
+        p = _make_player(rec)
+        nonzero = np.full(100, 5000, dtype="<i2").tobytes()  # preroll 閾値未満で滞留
+        p.write_bytes(nonzero)
+        p.set_muted(True)  # preroll の非ゼロ音声をミュート
+        p.close()  # close で preroll flush → _write がゼロ化
+        audio = [w for w in rec.data if len(w) > 0]
+        assert audio
+        assert all(not np.any(w) for w in audio)  # preroll を含め全無音
+
+    def test_unmuted_writes_preroll_audio_on_close(self):
+        rec = _RecStream()
+        p = _make_player(rec)
+        nonzero = np.full(100, 5000, dtype="<i2").tobytes()
+        p.write_bytes(nonzero)
+        p.close()
+        assert any(np.any(w) for w in rec.data)  # 非ミュートは preroll 音声を出力
+
+
 class TestLazyStart:
     def test_init_does_not_call_start(self):
         stream = FakeStream()
