@@ -189,7 +189,7 @@ enabled = true        # 既定 false
 host = "127.0.0.1"    # ローカル専用（非loopbackは token 必須・未設定なら自動無効化）
 port = 8772           # 入力口(8770)/音声モニタ(8771)とは別ポート
 token = ""            # 任意の共有秘密。設定時は ?token= か Authorization: Bearer で必須
-template = ""         # 独自字幕HTMLの絶対パス（空＝同梱デフォルトを使用）
+template = ""         # 同梱プリセット名("vtuber") か 独自字幕HTMLの絶対パス（空＝既定フェード式）
 max_chars = 200       # 蓄積字幕の最大長（超過時は末尾優先で切詰め）
 ```
 
@@ -199,6 +199,15 @@ OBS 側の手順:
 3. 背景は透過なので、緑背景・クロマキー不要でそのまま乗ります。
 
 **見た目の変え方**: 同梱の字幕HTML（`GET /` が返すページ）冒頭の CSS 変数 `:root{ --font / --size / --color / --stroke-color / --stroke-width / --shadow / --align / --valign / --fade-ms / --max-width }` を書き換えるだけで一括変更できます。丸ごと差し替えたい場合は自作HTMLを `template` に指定。フォントは `@font-face`（ローカルフォント）かシステムフォント、縁取りは `-webkit-text-stroke` ＋ `text-shadow`（多重で太く）。編集は**ブラウザソースを再読込**すれば即反映（サーバ再起動不要）。
+
+**スタイルプリセット**: `[caption].template` で同梱プリセットを名前で選べます（URLは常に `http://host:port/`）。
+| `template` | スタイル | 挙動 |
+|---|---|---|
+| `""`（既定） | フェード式 | 鳴り始めでフェードイン、鳴り終わりでフェードアウト |
+| `"vtuber"` | **VTuber風 切り替わり** | **フェードアウトしない＝消えず、次の発話で瞬時に切り替わる**（VTuber動画の字幕風）。切替に軽い pop アニメ。`--pop-ms` で速度、`--box-bg` に色を入れると角丸の背景パネルになる |
+| `"/abs/path.html"` | 独自 | 自分で書いた HTML をそのまま配信 |
+
+> プリセットは `src/text_to_shaberi/client/caption/*.html`。自作する場合はこれらをコピーして CSS/JS を編集し、`template` に絶対パスで指定するのが安全（更新で上書きされない）。
 
 **独自オーバーレイを作る場合**（口パク連携など）: `ws://127.0.0.1:8772/ws` に接続し、次のイベントを受信します（受信専用・複数接続可・非loopback時は `?token=` を付与）。
 ```
