@@ -131,13 +131,21 @@ class WSClient:
         # monitor tee: 全合成音声を broadcast（capture/通常を問わず）。best-effort。
         self._on_monitor = on_monitor
         self._monitor_open: bool = False
-        # caption tee: 配信字幕。AudioBegin で表示・AudioEnd(_finish_stream) で消去。
-        # text-stream は音声ゲート付きで送信済みセグメントを蓄積（_caption_buf）。best-effort。
+        # caption tee: 配信字幕。AudioBegin で表示。消去は「実際の再生終了」に同期させるため
+        # AudioEnd 正常パスでは即時でなく、復号 PCM の実長から算出したタイマーで遅延消去する
+        # （docs/IMPL-CAPTION-PLAYBACK-SYNC.md）。text-stream は送信済みセグメントを蓄積（_caption_buf）。
         self._on_caption = on_caption
         self._caption_open: bool = False
         self._caption_buf: list[str] = []
         self._caption_seq: int = 0
         self._caption_max: int = max(1, caption_max)
+        # 再生終了同期のための計測（当該発話の復号 PCM 実長 → 残再生分だけ消去を遅らせる）。
+        self._caption_pid: str | None = None       # 表示中字幕の playback id（誤消去防止の照合用）
+        self._caption_clear_timer: Any = None       # 遅延消去 TimerHandle（無ければ None）
+        self._audio_bytes: int = 0                   # 当該発話の復号後 PCM 累積バイト数
+        self._decoded_sr: int = 0
+        self._decoded_ch: int = 1
+        self._first_chunk_t: float | None = None     # 最初の feed 時刻（≒再生開始の代理）
         # ローカル再生ミュート: engine/sink の出力フレームを無音化（feed は継続。
         # monitor/forward_audio は別経路で継続）。
         self._muted: bool = False
@@ -270,6 +278,8 @@ class WSClient:
                 return False
 
     async def _teardown_ws(self) -> None:
+        # defer 中の遅延消去タイマー＋表示中字幕を確実に始末（close/reconnect 共通経路）。
+        self._clear_caption_now()
         if self._recv_task is not None:
             self._recv_task.cancel()
             try:
@@ -585,13 +595,19 @@ class WSClient:
             return True
 
     async def cancel(self) -> None:
-        if self._active_id is None:
+        # defer 中（AudioEnd 済みで _active_id=None だが字幕表示中＋再生がまだ流れている）も
+        # 停止対象にする。ユーザーの stop で遅延字幕を即消去し、常駐 engine の残再生は abort。
+        # （sink fallback 経路は _finish_stream で参照を手放し済みのため残再生は止め切れず drain する）。
+        if self._active_id is None and not self._caption_open:
             self._log("cancel: active 無し")
             return
         if self._engine is not None:
             self._engine.abort()
         if self._sink is not None:
             self._sink.abort()
+        self._clear_caption_now()
+        if self._active_id is None:
+            return  # defer 中: stream は終了済みなのでサーバ Cancel は不要
         self._cancelling = True
         try:
             await self._send(Cancel(id=self._active_id))
@@ -698,6 +714,8 @@ class WSClient:
                 if self._sink is not None:
                     self._sink.abort()
                 self._finish_stream()
+            # defer 正常終了後は _active_id=None だが字幕＋遅延タイマーが残り得る。切断で必ず消す。
+            self._clear_caption_now()
             self._state("disconnected")
             if not cancelled and not self._user_closing and self._auto_reconnect:
                 self._get_loop().call_soon(self._schedule_reconnect)
@@ -713,6 +731,8 @@ class WSClient:
                 self._log("opus decode 失敗")
                 if self._engine is not None:
                     self._engine.abort()
+                if self._sink is not None:
+                    self._sink.abort()
                 self._cancelling = True
                 self._finish_stream()
                 self._state("error", "opus decode failed")
@@ -739,6 +759,8 @@ class WSClient:
                 self._sink.abort()
             self._cancelling = True
             self._log("再生が追いつきません")
+            # overload で再生を中断するので字幕も即消去（サーバ応答に依存しない）。
+            self._clear_caption_now()
 
             async def _cancel_after_overload() -> None:
                 try:
@@ -748,6 +770,11 @@ class WSClient:
 
             self._get_loop().create_task(_cancel_after_overload())
             return
+
+        # 再生終了同期の計測（feed 成功後・実再生される pcm のみ計上）。
+        if self._first_chunk_t is None:
+            self._first_chunk_t = self._get_loop().time()
+        self._audio_bytes += len(pcm)
 
         self._maybe_log_ttfa()
 
@@ -808,7 +835,14 @@ class WSClient:
 
                 # caption tee: 表示開始（現在の蓄積テキストを出す。capture でも出す＝
                 # 受信側が喋るので「今喋ってる内容」。monitor と同じく capture 非依存）。
+                # 前発話の遅延消去タイマーが残っていれば破棄し、新発話の計測をリセット。
+                self._cancel_caption_clear_timer()
                 self._caption_open = True
+                self._caption_pid = msg.id
+                self._decoded_sr = decoded_sr
+                self._decoded_ch = decoded_ch
+                self._audio_bytes = 0
+                self._first_chunk_t = None
                 self._emit_caption("".join(self._caption_buf), True)
 
                 if self._is_capture():
@@ -876,7 +910,12 @@ class WSClient:
                         self._engine.end()
                     if self._sink is not None:
                         self._sink.end()
-                    self._finish_stream()
+                    # 字幕消去だけは「実際の再生終了」に同期させて遅延する。delay と pid は
+                    # _finish_stream（状態を大量に reset する）を呼ぶ前に snapshot しておく。
+                    delay = self._compute_caption_clear_delay()
+                    pid = self._caption_pid
+                    self._finish_stream(defer_caption_clear=True)
+                    self._schedule_caption_clear(pid, delay)
             elif msg.id == self._active_id and self._playback_id is None:
                 # 音声ゼロで正常終了した stream（空テキスト等）: 再生は無いが
                 # active を解放して idle 復帰させる(§14.1)。
@@ -917,15 +956,20 @@ class WSClient:
 
         self._log(f"無視: {getattr(msg, 'type', '?')}")
 
-    def _finish_stream(self) -> None:
+    def _finish_stream(self, defer_caption_clear: bool = False) -> None:
         # monitor tee の音声終端を全終了経路で1回だけ broadcast（begin 未発火なら出さない）。
         if self._monitor_open:
             self._monitor_open = False
             self._emit_monitor("end", None)
-        # caption tee: 音声終端で字幕を消去（begin 未発火＝未表示なら出さない・1回だけ）。
-        if self._caption_open:
-            self._caption_open = False
-            self._emit_caption("", False)
+        # caption tee: 字幕消去。AudioEnd 正常パス（defer=True）は呼び出し側が
+        # _schedule_caption_clear で「実再生終了」に同期させて消すため、ここでは消さず
+        # _caption_open/_caption_pid を残す。それ以外（cancel/capture/error/STT等）は即消去。
+        if not defer_caption_clear:
+            self._cancel_caption_clear_timer()
+            if self._caption_open:
+                self._caption_open = False
+                self._caption_pid = None
+                self._emit_caption("", False)
         self._caption_buf = []
         # capture stream の音声終端を全終了経路で1回だけ通知（§10.2）。
         if self._tap_open:
@@ -943,3 +987,61 @@ class WSClient:
         self._opus_decoder = None
         self._stream_mode = False
         self._state("idle")
+
+    # ── 字幕消去の「実再生終了」同期 ───────────────────────────────────
+    # 字幕は表示=AudioBegin・消去=AudioEnd だが、AudioEnd は「データ受信完了」で、
+    # ローカル再生は engine/sink の worker がバッファを再生レートで消化するため後まで続く。
+    # 高速TTSでは字幕が喋り終わりより早く消える。そこで AudioEnd 正常パスでは消去を、
+    # 受信済み復号 PCM の実長から算出した「残再生分＋わずかな余白」だけ遅らせる。
+    # 全て recv ループ（単一スレッド）上で完結し、タイマー自体が消去機構なので
+    # 「字幕が消えない」再発はしない（worker 完了通知に依存しない）。
+
+    _CAPTION_PREROLL_EST_MS = 200   # 再生開始の食い込み補正（preroll 概算）
+    _CAPTION_END_MARGIN_MS = 150    # device latency＋ごく短い余韻（正方向＝早消え防止）
+
+    def _compute_caption_clear_delay(self) -> float:
+        """AudioEnd 時点で、残再生分＋余白の遅延秒数を算出（_finish_stream を呼ぶ前に snapshot）。
+
+        既定の opus は常に 48kHz/mono なので正確。PCM passthrough かつ stereo の場合は
+        engine が mono として扱う既存仕様（multi-channel 未対応）と見積り（実長）がズレ得るが、
+        stereo PCM は元々 engine 側で非対応の構成のため許容（mono 前提）。
+        """
+        bps = self._decoded_sr * self._decoded_ch * 2  # pcm_s16le 前提
+        total_ms = (self._audio_bytes / bps * 1000.0) if bps > 0 else 0.0
+        loop = self._get_loop()
+        start_t = self._first_chunk_t if self._first_chunk_t is not None else loop.time()
+        # prime_ms は sink 経路の先頭無音用。常駐 engine は prewarm/keepalive 型で未使用。
+        prime_component = 0 if self._engine is not None else self._prime_ms
+        clear_at = start_t + (
+            prime_component + self._CAPTION_PREROLL_EST_MS + total_ms + self._CAPTION_END_MARGIN_MS
+        ) / 1000.0
+        return max(0.0, clear_at - loop.time())
+
+    def _schedule_caption_clear(self, pid: str | None, delay: float) -> None:
+        self._cancel_caption_clear_timer()
+        if not self._caption_open:
+            return
+        self._caption_clear_timer = self._get_loop().call_later(
+            delay, self._do_caption_clear, pid
+        )
+
+    def _do_caption_clear(self, pid: str | None) -> None:
+        self._caption_clear_timer = None
+        # pid ガード: A→B 連続発話で A の遅延消去が B の字幕を消さない。
+        if self._caption_open and pid == self._caption_pid:
+            self._caption_open = False
+            self._caption_pid = None
+            self._emit_caption("", False)
+
+    def _cancel_caption_clear_timer(self) -> None:
+        if self._caption_clear_timer is not None:
+            self._caption_clear_timer.cancel()
+            self._caption_clear_timer = None
+
+    def _clear_caption_now(self) -> None:
+        """遅延消去タイマーを破棄し、表示中なら即消去（中断/切断/close 用）。"""
+        self._cancel_caption_clear_timer()
+        if self._caption_open:
+            self._caption_open = False
+            self._caption_pid = None
+            self._emit_caption("", False)
