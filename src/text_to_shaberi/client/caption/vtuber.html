@@ -12,6 +12,12 @@
     client.toml で [caption].template = "vtuber" を指定。
     OBS ブラウザソースの URL は http://127.0.0.1:8772/（GET / がこのプリセットを返す）
 
+  配信ディレイ同期（遅延表示）:
+    テキスト切替を一律 delay ms 後ろへずらせます（OBS のストリームディレイに合わせる用途）。
+    設定は GUI の ⚙設定 →「字幕」→「配信ディレイ同期」(ms)、または URL ?delay=<ミリ秒>（URL が優先）:
+        http://127.0.0.1:8772/?delay=2000
+    ※ このプリセットは元々「消えない」仕様なので、遅延するのは切替タイミングのみです。
+
   CSS 変数一覧:
     --font          フォント
     --size          文字サイズ
@@ -91,6 +97,47 @@
   var lastSeq = -1;
   var current = '';
 
+  // 配信ディレイ同期: テキスト切替を一律 delay ms 後ろへずらす。
+  // 優先順位: URL ?delay= が明示指定なら最優先。無ければサーバ既定（UI 設定値）に追従。
+  var urlDelay = (function () {
+    var v = new URLSearchParams(location.search).get('delay');
+    if (v === null) return null;             // 指定なし → サーバ既定(UI設定)に従う
+    var n = parseInt(v, 10);
+    if (!isFinite(n) || n < 0) n = 0;
+    if (n > 60000) n = 60000;                // 上限 60s（暴走/タイプミス保護）
+    return n;
+  })();
+  var srvDelay = 0;                          // サーバ(UI設定)由来の既定 delay
+  function curDelay() {
+    var d = (urlDelay !== null) ? urlDelay : srvDelay;
+    return d > 0 ? d : 0;
+  }
+
+  var queue = [];                            // [{due, msg}] 受信順 FIFO
+  var timer = null;
+
+  function pump() {
+    timer = null;
+    var now = performance.now();
+    while (queue.length && queue[0].due <= now) apply(queue.shift().msg);
+    if (queue.length) timer = setTimeout(pump, Math.max(0, queue[0].due - performance.now()));
+  }
+
+  function enqueue(m) {
+    if (urlDelay === null && typeof m.delay === 'number' && m.delay >= 0) {
+      srvDelay = m.delay > 60000 ? 60000 : m.delay;  // UI 設定値を取り込む（seq に関係なく即時）
+    }
+    var d = curDelay();
+    if (d <= 0) { apply(m); return; }        // delay 0＝従来どおり即描画（後方互換）
+    // due 昇順を保って挿入（delay を短縮した時、後着が先頭より早い due でも正しく発火させる）。
+    var item = { due: performance.now() + d, msg: m };
+    var i = queue.length;
+    while (i > 0 && queue[i - 1].due > item.due) i--;
+    queue.splice(i, 0, item);
+    if (i === 0 && timer !== null) { clearTimeout(timer); timer = null; }  // 先頭が変化→張り直し
+    if (timer === null) pump();
+  }
+
   function swap(text) {
     cap.textContent = text;
     cap.classList.remove('pop');
@@ -113,9 +160,13 @@
     var url = (location.protocol === 'https:' ? 'wss://' : 'ws://')
       + location.host + '/ws' + location.search;
     var ws = new WebSocket(url);
-    ws.onopen = function () { lastSeq = -1; };
+    ws.onopen = function () {                 // 再接続: 旧接続の未描画イベントを捨て _cur 再送で再同期
+      queue.length = 0;
+      if (timer !== null) { clearTimeout(timer); timer = null; }
+      lastSeq = -1;
+    };
     ws.onmessage = function (e) {
-      try { apply(JSON.parse(e.data)); } catch (_) {}
+      try { enqueue(JSON.parse(e.data)); } catch (_) {}
     };
     ws.onclose = function () { setTimeout(connect, 1000); };
   }

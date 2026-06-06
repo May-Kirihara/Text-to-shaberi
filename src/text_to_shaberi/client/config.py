@@ -98,6 +98,7 @@ class CaptionConfig:
     token: str = ""
     template: str = ""      # ユーザーHTML差し替えパス（空=同梱デフォルト）
     max_chars: int = 200    # 蓄積字幕の最大長（超過時は末尾優先で切詰め）
+    delay_ms: int = 0       # 配信ディレイ同期: 字幕の表示/消去を遅らせる既定ms（URL ?delay= が優先）
 
 
 @dataclass(slots=True)
@@ -190,4 +191,8 @@ def load_client_config(path: str | Any) -> ClientConfig:
         cap.enabled = False
     if cap.max_chars < 1:
         cap.max_chars = 1
+    if cap.delay_ms < 0:
+        cap.delay_ms = 0
+    elif cap.delay_ms > 60000:
+        cap.delay_ms = 60000  # 上限 60s（暴走/タイプミス保護・JS 側と一致）
     return cfg

@@ -197,6 +197,7 @@ def test_caption_defaults(tmp_path):
     assert cfg.caption.token == ""
     assert cfg.caption.template == ""
     assert cfg.caption.max_chars == 200
+    assert cfg.caption.delay_ms == 0
 
 
 def test_caption_config_from_toml(tmp_path):
@@ -207,12 +208,28 @@ enabled = true
 port = 9100
 max_chars = 80
 template = "/tmp/my_caption.html"
+delay_ms = 2000
 """)
     cfg = load_client_config(str(p))
     assert cfg.caption.enabled is True
     assert cfg.caption.port == 9100
     assert cfg.caption.max_chars == 80
     assert cfg.caption.template == "/tmp/my_caption.html"
+    assert cfg.caption.delay_ms == 2000
+
+
+def test_caption_delay_ms_clamp(tmp_path):
+    p = tmp_path / "client.toml"
+    _write_toml(p, """
+[caption]
+delay_ms = -100
+""")
+    assert load_client_config(str(p)).caption.delay_ms == 0
+    _write_toml(p, """
+[caption]
+delay_ms = 999999
+""")
+    assert load_client_config(str(p)).caption.delay_ms == 60000
 
 
 def test_caption_nonloopback_without_token_disabled(tmp_path):

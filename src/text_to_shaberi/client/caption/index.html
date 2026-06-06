@@ -8,6 +8,19 @@
   - 幅・高さは任意（字幕位置は下記 CSS 変数で調整）
   - 背景は透過（OBS 側でアルファ取り込み可能）
 
+  配信ディレイ同期（遅延表示）
+  --------------------------
+  字幕の表示も消去もまるごと一定時間だけ後ろへずらせます。
+  OBS のストリームディレイや映像遅延フィルタに字幕タイミングを合わせる用途です。
+
+  設定方法は 2 通り（URL が優先）:
+    1) クライアント GUI の ⚙設定 →「字幕」→「配信ディレイ同期」(ms)
+       … 起動中の OBS ブラウザソースにも即時反映（リロード不要）。client.toml に保存。
+    2) URL に ?delay=<ミリ秒> を付ける（このソースだけ個別に上書きしたい時）:
+         http://127.0.0.1:8772/?delay=2000        （2 秒遅らせる）
+         http://127.0.0.1:8772/?delay=2000&token=xxx  （token 認証環境でも併用可）
+  ※ ソースは配信中ずっと接続したままにしてください（発話途中での新規接続では現在状態のみ復元）。
+
   見た目のカスタマイズ
   --------------------
   すべて下の :root { --xxx } を書き換えるだけで変えられます:
@@ -89,6 +102,48 @@
   const cap = document.getElementById('cap');
   let lastSeq = -1;
 
+  // 配信ディレイ同期: 表示/消去をまるごと delay ms 後ろへずらす（OBS のストリームディレイに合わせる）。
+  // 優先順位: URL ?delay= が明示指定なら最優先。無ければサーバ既定（UI 設定値）に追従。
+  // 表示も消去も同じ delay でずらすので、表示している長さ（相対タイミング）は不変。
+  const urlDelay = (function () {
+    const v = new URLSearchParams(location.search).get('delay');
+    if (v === null) return null;             // 指定なし → サーバ既定(UI設定)に従う
+    let n = parseInt(v, 10);
+    if (!isFinite(n) || n < 0) n = 0;
+    if (n > 60000) n = 60000;                // 上限 60s（暴走/タイプミス保護）
+    return n;
+  })();
+  let srvDelay = 0;                          // サーバ(UI設定)由来の既定 delay
+  function curDelay() {
+    const d = (urlDelay !== null) ? urlDelay : srvDelay;
+    return d > 0 ? d : 0;
+  }
+
+  let queue = [];                            // [{due, msg}] 受信順 FIFO
+  let timer = null;
+
+  function pump() {
+    timer = null;
+    const now = performance.now();
+    while (queue.length && queue[0].due <= now) apply(queue.shift().msg);
+    if (queue.length) timer = setTimeout(pump, Math.max(0, queue[0].due - performance.now()));
+  }
+
+  function enqueue(m) {
+    if (urlDelay === null && typeof m.delay === 'number' && m.delay >= 0) {
+      srvDelay = m.delay > 60000 ? 60000 : m.delay;  // UI 設定値を取り込む（seq に関係なく即時）
+    }
+    const d = curDelay();
+    if (d <= 0) { apply(m); return; }        // delay 0＝従来どおり即描画（後方互換）
+    // due 昇順を保って挿入（delay を短縮した時、後着が先頭より早い due でも正しく発火させる）。
+    const item = { due: performance.now() + d, msg: m };
+    let i = queue.length;
+    while (i > 0 && queue[i - 1].due > item.due) i--;
+    queue.splice(i, 0, item);
+    if (i === 0 && timer !== null) { clearTimeout(timer); timer = null; }  // 先頭が変化→張り直し
+    if (timer === null) pump();
+  }
+
   function apply(m) {
     if (typeof m.seq === 'number' && m.seq < lastSeq) return;
     lastSeq = m.seq ?? lastSeq;
@@ -104,9 +159,13 @@
     const url = (location.protocol === 'https:' ? 'wss://' : 'ws://')
       + location.host + '/ws' + location.search;
     const ws = new WebSocket(url);
-    ws.onopen = function () { lastSeq = -1; };
+    ws.onopen = function () {                 // 再接続: 旧接続の未描画イベントを捨て _cur 再送で再同期
+      queue.length = 0;
+      if (timer !== null) { clearTimeout(timer); timer = null; }
+      lastSeq = -1;
+    };
     ws.onmessage = function (e) {
-      try { apply(JSON.parse(e.data)); } catch (_) {}
+      try { enqueue(JSON.parse(e.data)); } catch (_) {}
     };
     ws.onclose = function () { setTimeout(connect, 1000); };
   }

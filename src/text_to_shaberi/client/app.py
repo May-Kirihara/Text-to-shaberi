@@ -279,6 +279,7 @@ def run_gui(config_path: str | Path) -> None:
             port=cfg.caption.port,
             token=cfg.caption.token,
             template=cfg.caption.template,
+            delay_ms=cfg.caption.delay_ms,
             on_log=window.log,
             loop=loop,
         )
@@ -408,6 +409,13 @@ def run_gui(config_path: str | Path) -> None:
 
             output_vals = vals.get("output", {})
             cfg.output.device = output_vals.get("device", cfg.output.device)
+
+            caption_vals = vals.get("caption", {})
+            if "delay_ms" in caption_vals:
+                cfg.caption.delay_ms = int(caption_vals["delay_ms"])
+                srv = _caption_server_holder[0]
+                if srv is not None:
+                    srv.set_delay(cfg.caption.delay_ms)  # 起動中OBSへ即時反映
 
             ws._apply_server_settings(
                 codec_pref=cfg.server.codec,
