@@ -454,10 +454,19 @@ def test_page_bytes_default_is_index_fade():
 
 
 def test_page_bytes_vtuber_preset():
-    # template="vtuber" → 同梱 caption/vtuber.html（pop アニメ・フェードなし）
+    # template="vtuber" → 同梱 caption/vtuber.html（pop アニメ・瞬時切替）
     page = CaptionServer(template="vtuber")._page_bytes()
     assert b"--pop-ms" in page
-    assert b"#cap.show" not in page  # フェード式ではない
+    assert b"#cap.show" not in page  # index のフェード式クラスではない
+
+
+def test_vtuber_preset_clears_on_speech_end():
+    # VTuber プリセットは発話終了(visible:false)で速やかにフェードアウトして消える
+    # （「常時表示で消えない」回帰を防ぐ）。
+    page = CaptionServer(template="vtuber")._page_bytes()
+    assert b"#cap.hide" in page          # 消去用クラス
+    assert b"--out-ms" in page           # フェードアウト時間変数
+    assert b"add('hide')" in page        # clear で hide を付与
 
 
 def test_page_bytes_vtuber_preset_with_html_suffix():

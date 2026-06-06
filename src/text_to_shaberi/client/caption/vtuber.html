@@ -3,9 +3,8 @@
   ================================================================
 
   index.html（既定フェード式）との違い:
-    - フェードアウトしない / 消えない — 直近の非空テキストを保持し続ける
-    - テキスト変更は瞬時（opacity フェードなし）
-    - 切替時に軽い pop アニメ（--pop-ms: 0 で無効化）
+    - テキスト変更は瞬時（フェードなしで切替）＋切替時に軽い pop アニメ（--pop-ms: 0 で無効化）
+    - 発話が終わると速やかにフェードアウトして消える（--out-ms で時間調整・0 で瞬時）
     - 任意の背景ボックス（--box-bg に色を入れると角丸パネル表示）
 
   使い方:
@@ -16,7 +15,7 @@
     テキスト切替を一律 delay ms 後ろへずらせます（OBS のストリームディレイに合わせる用途）。
     設定は GUI の ⚙設定 →「字幕」→「配信ディレイ同期」(ms)、または URL ?delay=<ミリ秒>（URL が優先）:
         http://127.0.0.1:8772/?delay=2000
-    ※ このプリセットは元々「消えない」仕様なので、遅延するのは切替タイミングのみです。
+    ※ 表示の切替も消去も一律 delay ms ずれます（相対タイミングは不変）。
 
   CSS 変数一覧:
     --font          フォント
@@ -29,6 +28,7 @@
     --valign        垂直位置 (flex-end / center / flex-start)
     --max-width     字幕最大幅
     --pop-ms        切替 pop アニメ時間（0 で無効）
+    --out-ms        発話終了時のフェードアウト時間（0 で瞬時に消える）
     --box-bg        背景ボックス色（transparent で非表示）
     --box-radius    背景ボックス角丸
     --box-pad       背景ボックス内余白
@@ -49,6 +49,7 @@
     --valign: flex-end;
     --max-width: 90vw;
     --pop-ms: 120ms;
+    --out-ms: 200ms;
     --box-bg: transparent;
     --box-radius: 12px;
     --box-pad: .15em .5em;
@@ -80,6 +81,12 @@
     white-space: pre-wrap;
     word-break: break-word;
     transform: translate(0, 0);
+    opacity: 1;
+    transition: opacity 0s;          /* 表示は瞬時（VTuber風の即時切替を維持） */
+  }
+  #cap.hide {
+    opacity: 0;
+    transition: opacity var(--out-ms) ease;   /* 発話終了時だけフェードアウト */
   }
   @keyframes pop {
     from { transform: scale(.96) translateY(4px); opacity: .7; }
@@ -91,7 +98,7 @@
 </style>
 </head>
 <body>
-<div id="wrap"><div id="cap"></div></div>
+<div id="wrap"><div id="cap" class="hide"></div></div>
 <script>
   var cap = document.getElementById('cap');
   var lastSeq = -1;
@@ -149,10 +156,15 @@
     if (typeof m.seq === 'number' && m.seq < lastSeq) return;
     lastSeq = m.seq ?? lastSeq;
     if (m.visible && m.text) {
+      cap.classList.remove('hide');            // 表示（フェードなしで瞬時に出す）
       if (m.text !== current) {
         current = m.text;
         swap(m.text);
       }
+    } else {
+      // 発話終了（visible:false）/空テキスト → 速やかにフェードアウトして消す
+      cap.classList.add('hide');
+      current = '';                            // 次発話で同テキストでも確実に再表示＆pop
     }
   }
 
