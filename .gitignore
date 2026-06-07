@@ -230,3 +230,4 @@ server.docker.toml
 
 # docker compose: secret 入りサーバ設定の実体（.example のみ追跡）
 deploy/server.docker.toml
+test.srt
