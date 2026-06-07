@@ -106,3 +106,8 @@ class TestSrtTabPlayingState:
     def test_pause_button_initially_disabled(self, qapp):
         tab = SrtTabWidget()
         assert not tab.pause_button.isEnabled()
+
+    def test_wait_playback_check_initial_state(self, qapp):
+        tab = SrtTabWidget()
+        assert tab.wait_playback_check.isChecked()
+        assert tab.wait_playback_check.isCheckable()

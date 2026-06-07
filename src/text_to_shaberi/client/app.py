@@ -237,7 +237,8 @@ def run_gui(config_path: str | Path) -> None:
         def _on_entry(idx, total, entry):
             srt_tab.set_current_entry(idx, total)
 
-        await srt_player.play(entries, profile=cfg.profile.active_id or None, on_entry=_on_entry)
+        wait_pb = srt_tab.wait_playback_check.isChecked()
+        await srt_player.play(entries, profile=cfg.profile.active_id or None, on_entry=_on_entry, wait_for_playback=wait_pb)
         srt_tab.set_playing(False)
         srt_tab.progress_bar.setValue(0)
         window.set_busy(False)

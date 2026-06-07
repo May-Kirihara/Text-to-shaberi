@@ -146,6 +146,7 @@ class WSClient:
         self._decoded_sr: int = 0
         self._decoded_ch: int = 1
         self._first_chunk_t: float | None = None     # 最初の feed 時刻（≒再生開始の代理）
+        self._last_playback_remaining: float = 0.0   # AudioEnd時の残再生時間snapshot
         # ローカル再生ミュート: engine/sink の出力フレームを無音化（feed は継続。
         # monitor/forward_audio は別経路で継続）。
         self._muted: bool = False
@@ -914,6 +915,7 @@ class WSClient:
                     # _finish_stream（状態を大量に reset する）を呼ぶ前に snapshot しておく。
                     delay = self._compute_caption_clear_delay()
                     pid = self._caption_pid
+                    self._last_playback_remaining = self.snapshot_playback_remaining()
                     self._finish_stream(defer_caption_clear=True)
                     self._schedule_caption_clear(pid, delay)
             elif msg.id == self._active_id and self._playback_id is None:
@@ -1016,6 +1018,16 @@ class WSClient:
             prime_component + self._CAPTION_PREROLL_EST_MS + total_ms + self._CAPTION_END_MARGIN_MS
         ) / 1000.0
         return max(0.0, clear_at - loop.time())
+
+    _PLAYBACK_END_MARGIN_S: float = 0.15
+
+    def snapshot_playback_remaining(self) -> float:
+        bps = self._decoded_sr * self._decoded_ch * 2
+        total_s = (self._audio_bytes / bps) if bps > 0 else 0.0
+        loop = self._get_loop()
+        start_t = self._first_chunk_t if self._first_chunk_t is not None else loop.time()
+        play_at = start_t + total_s + self._PLAYBACK_END_MARGIN_S
+        return max(0.0, play_at - loop.time())
 
     def _schedule_caption_clear(self, pid: str | None, delay: float) -> None:
         self._cancel_caption_clear_timer()

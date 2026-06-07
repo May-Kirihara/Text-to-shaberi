@@ -22,7 +22,7 @@ class SrtPlayer:
     def is_playing(self) -> bool:
         return self._srt_playing
 
-    async def play(self, entries, profile=None, on_entry=None):
+    async def play(self, entries, profile=None, on_entry=None, wait_for_playback=False):
         self._srt_playing = True
         self._stop_flag = False
         self._paused_cumulative = 0.0
@@ -69,6 +69,12 @@ class SrtPlayer:
 
                 if self._stop_flag:
                     break
+
+                if wait_for_playback:
+                    remaining = self._ws_client._last_playback_remaining
+                    if remaining > 0:
+                        if not await self._wait_with_pause(remaining):
+                            break
 
                 # pause中ならここで待機（cancel後の即進行防止）
                 if not self._pause_event.is_set():

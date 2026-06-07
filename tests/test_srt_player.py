@@ -26,6 +26,7 @@ class FakeWSClient:
         self.cancel_log: list[str] = []
         self._speak_delay = speak_delay
         self._on_state = None
+        self._last_playback_remaining: float = 0.0
 
     async def speak(self, text, profile=None):
         if self._active_id is not None or not self._connected:
@@ -244,5 +245,43 @@ class TestSrtPlayerPauseResume:
             loop.create_task(_pause_resume())
             await player.play(entries)
             assert len(ws.speak_log) == 3
+
+        _run_test(go())
+
+
+class TestSrtPlayerWaitForPlayback:
+    def test_wait_for_playback_sleeps_remaining(self):
+        async def go():
+            loop = asyncio.get_event_loop()
+            ws = FakeWSClient(loop, speak_delay=0.02)
+            ws._last_playback_remaining = 0.15
+            player = SrtPlayer(loop, ws)
+            entries = _make_entries(
+                (0, 100, "A"),
+                (0, 100, "B"),
+            )
+            t0 = time.monotonic()
+            await player.play(entries, wait_for_playback=True)
+            elapsed = time.monotonic() - t0
+            assert elapsed >= 0.14
+            assert len(ws.speak_log) == 2
+
+        _run_test(go())
+
+    def test_wait_for_playback_false_skips_remaining(self):
+        async def go():
+            loop = asyncio.get_event_loop()
+            ws = FakeWSClient(loop, speak_delay=0.02)
+            ws._last_playback_remaining = 0.5
+            player = SrtPlayer(loop, ws)
+            entries = _make_entries(
+                (0, 100, "A"),
+                (0, 100, "B"),
+            )
+            t0 = time.monotonic()
+            await player.play(entries, wait_for_playback=False)
+            elapsed = time.monotonic() - t0
+            assert elapsed < 0.3
+            assert len(ws.speak_log) == 2
 
         _run_test(go())
