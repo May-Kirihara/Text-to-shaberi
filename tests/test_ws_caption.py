@@ -55,12 +55,13 @@ class FakeWS:
         pass
 
 
-def _mk(on_caption, *, capture_id=None, stream_mode=False, auto_tts=False):
+def _mk(on_caption, *, capture_id=None, stream_mode=False, auto_tts=False, **ws_kwargs):
     ws = WSClient(
         "ws://127.0.0.1:1/ws",
         on_caption=on_caption,
         sink_factory=FakeSink,
         loop=_LOOP,
+        **ws_kwargs,
     )
     ws._active_id = "s1"
     ws._cancelling = False
@@ -325,6 +326,59 @@ def test_caption_clear_delay_scales_with_audio_length():
     long = delay_for(24000 * 2 * 2)      # 2.0 秒分
     assert long - short > 1.5            # 音声長差(~1.9s)がほぼ delay 差に出る
     assert long > 2.0
+
+
+# ---- ホールド（余韻）: 実再生終了後の dwell（dwell + replace） ----
+
+def _hold_delay_for(text, **hold_kwargs):
+    """buf=text・音声1.0秒固定で消去遅延を算出（ホールド値だけを動かす）。"""
+    ws = _mk(lambda e, p: None, **hold_kwargs)
+    ws._caption_buf = [text]
+    ws._on_message(AudioBegin(id="s1", format=_FMT))  # 24000Hz mono s16le
+    ws._on_binary(b"\x00" * (24000 * 2))              # 1.0 秒分
+    return ws._compute_caption_clear_delay()
+
+
+def test_caption_hold_scales_with_text_length():
+    # 同じ音声長でも表示文字数が多いほどホールドが伸びる（長文の読み残し対策）。
+    # 既定: 1字 hold=min(2000+20,5000)=2020ms / 100字 hold=min(2000+2000,5000)=4000ms
+    short = _hold_delay_for("あ")
+    long = _hold_delay_for("あ" * 100)
+    assert long - short > 1.5           # 文字数差(99字×20ms ≈ 1.98s)がほぼ出る
+    assert long > short
+
+
+def test_caption_hold_capped_by_max():
+    # base+文字数分が hold_max(5000ms) に達したらそれ以上伸びない。
+    d200 = _hold_delay_for("あ" * 200)  # min(2000+4000,5000)=5000 → cap 到達
+    d400 = _hold_delay_for("あ" * 400)  # min(2000+8000,5000)=5000
+    assert abs(d400 - d200) < 0.1       # cap で打ち切り→差ほぼ0
+
+
+def test_caption_hold_max_smaller_than_base():
+    # hold_max_ms < hold_base_ms は上限が優先（min() 挙動・ドキュメント明記の動作）。
+    d = _hold_delay_for("あ" * 10, caption_hold_base_ms=2000,
+                        caption_hold_char_ms=20, caption_hold_max_ms=1000)
+    # base(2000)+10字×20=2200ms だが max=1000 で打ち切り → hold=1000ms
+    # 隣接確認: char分を伸ばしても max で同じ値になることを対比で保証
+    d2 = _hold_delay_for("あ" * 100, caption_hold_base_ms=2000,
+                         caption_hold_char_ms=20, caption_hold_max_ms=1000)
+    assert abs(d2 - d) < 0.1
+    # ホールド無効との差がちょうど max(1000ms)分＝cap 値そのものが上乗せされる
+    off = _hold_delay_for("あ" * 10, caption_hold_base_ms=0,
+                          caption_hold_char_ms=0, caption_hold_max_ms=0)
+    assert 0.8 < d - off < 1.2
+
+
+def test_caption_hold_disabled_matches_legacy_delay():
+    # hold 3引数とも 0 → 従来動作（実再生終了+余白のみ・+2秒の余韻なし）。
+    off = _hold_delay_for("あ" * 50, caption_hold_base_ms=0, caption_hold_char_ms=0,
+                          caption_hold_max_ms=0)
+    on = _hold_delay_for("あ" * 50)
+    # 旧来値: prime(500)+preroll(200)+音声(1000)+margin(150) ≈ 1.85s
+    assert abs(off - 1.85) < 0.2
+    # 既定 hold（50字: min(2000+1000,5000)=3000ms）が上乗せされる
+    assert on - off > 2.5
 
 
 def test_deferred_clear_does_not_clear_next_caption():

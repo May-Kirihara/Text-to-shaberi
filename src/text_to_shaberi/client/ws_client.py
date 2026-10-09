@@ -78,6 +78,9 @@ class WSClient:
         on_monitor: Callable[[str, Any], None] | None = None,
         on_caption: Callable[[str, Any], None] | None = None,
         caption_max: int = 200,
+        caption_hold_base_ms: int = 2000,
+        caption_hold_char_ms: int = 20,
+        caption_hold_max_ms: int = 5000,
     ) -> None:
         self._address = address
         self._token = token
@@ -133,12 +136,18 @@ class WSClient:
         self._monitor_open: bool = False
         # caption tee: 配信字幕。AudioBegin で表示。消去は「実際の再生終了」に同期させるため
         # AudioEnd 正常パスでは即時でなく、復号 PCM の実長から算出したタイマーで遅延消去する
-        # （docs/IMPL-CAPTION-PLAYBACK-SYNC.md）。text-stream は送信済みセグメントを蓄積（_caption_buf）。
+        # （docs/IMPL-CAPTION-PLAYBACK-SYNC.md）。再生終了後はホールド（余韻）分さらに残してから
+        # 消す（dwell + replace: 次発話 AudioBegin で即置換・stop/error は即消去）。
+        # text-stream は送信済みセグメントを蓄積（_caption_buf）。
         self._on_caption = on_caption
         self._caption_open: bool = False
         self._caption_buf: list[str] = []
         self._caption_seq: int = 0
         self._caption_max: int = max(1, caption_max)
+        # ホールド（余韻）: 実再生終了後に字幕を残す時間。3引数とも 0 で従来動作（余韻なし）。
+        self._caption_hold_base_ms = max(0, int(caption_hold_base_ms))
+        self._caption_hold_char_ms = max(0, int(caption_hold_char_ms))
+        self._caption_hold_max_ms = max(0, int(caption_hold_max_ms))
         # 再生終了同期のための計測（当該発話の復号 PCM 実長 → 残再生分だけ消去を遅らせる）。
         self._caption_pid: str | None = None       # 表示中字幕の playback id（誤消去防止の照合用）
         self._caption_clear_timer: Any = None       # 遅延消去 TimerHandle（無ければ None）
@@ -1002,7 +1011,13 @@ class WSClient:
     _CAPTION_END_MARGIN_MS = 150    # device latency＋ごく短い余韻（正方向＝早消え防止）
 
     def _compute_caption_clear_delay(self) -> float:
-        """AudioEnd 時点で、残再生分＋余白の遅延秒数を算出（_finish_stream を呼ぶ前に snapshot）。
+        """AudioEnd 時点で、残再生分＋余白＋ホールド（余韻）の遅延秒数を算出（_finish_stream を呼ぶ前に snapshot）。
+
+        ホールドは dwell + replace: 話速（約6字/秒）>読み速度（約4字/秒）のため長文ほど
+        読み残しが発生する。実再生終了後も min(hold_base_ms + 表示文字数×hold_char_ms,
+        hold_max_ms) だけ字幕を残す。次発話は AudioBegin がタイマーを cancel して即置換、
+        stop/cancel/error は従来どおり即消去のため、ホールドは純増の安全側。
+        hold_max_ms < hold_base_ms の場合は上限が優先（min() 挙動）。
 
         既定の opus は常に 48kHz/mono なので正確。PCM passthrough かつ stereo の場合は
         engine が mono として扱う既存仕様（multi-channel 未対応）と見積り（実長）がズレ得るが、
@@ -1014,8 +1029,16 @@ class WSClient:
         start_t = self._first_chunk_t if self._first_chunk_t is not None else loop.time()
         # prime_ms は sink 経路の先頭無音用。常駐 engine は prewarm/keepalive 型で未使用。
         prime_component = 0 if self._engine is not None else self._prime_ms
+        # _caption_buf は stream 末尾で max_chars 折りたたみ済みなので join 長＝実際の表示文字数。
+        # AudioEnd 正常パスでは _finish_stream（buf を reset する）前に呼ばれるため buf は生存。
+        hold_ms = min(
+            self._caption_hold_base_ms
+            + len("".join(self._caption_buf)) * self._caption_hold_char_ms,
+            self._caption_hold_max_ms,
+        )
         clear_at = start_t + (
-            prime_component + self._CAPTION_PREROLL_EST_MS + total_ms + self._CAPTION_END_MARGIN_MS
+            prime_component + self._CAPTION_PREROLL_EST_MS + total_ms
+            + self._CAPTION_END_MARGIN_MS + hold_ms
         ) / 1000.0
         return max(0.0, clear_at - loop.time())
 

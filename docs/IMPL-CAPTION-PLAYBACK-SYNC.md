@@ -134,3 +134,54 @@ duration snapshot / prime backend 別 / feed 成功後加算 / pid ガード＋t
 
 ## やらないこと
 - 表示開始の実再生同期（May は消去のみ選択）。capture の同期（手元再生なし）。
+
+## ホールド時間（余韻）の追加（dwell + replace）
+
+### 背景
+「実再生終了 + 150ms（END_MARGIN）」で消えても、**話速（約6字/秒）＞読み速度（約4字/秒）**のため
+長文ほど視聴者が読み終える前に字幕が消える（読み残し）。放送字幕の「1秒4字」則は翻訳字幕
+（聞き取れない外国語を読む）向けの値で、同言語の TTS 補助字幕には長すぎる。そこで表示時間を
+伸ばすのではなく**ホールド型（dwell + replace）**で解決する: 発話の実再生終了後、字幕を文字数に
+応じた時間だけ残し（dwell）、**次の発話が来たら即座に置換**（replace）する。
+
+「次の字幕が来たら即置換」「ユーザー停止・エラーは即消去」は既存機構（AudioBegin が clear timer
+を cancel して新字幕表示＋pid ガード、`_finish_stream(defer=False)` の即消去）で既に成立している。
+本変更は消去タイマーの遅延にホールド分を**加算するのみ**。
+
+### 数式
+`_compute_caption_clear_delay()`（AudioEnd 正常パスで `_finish_stream` 前に呼ぶ＝`_caption_buf` 生存）:
+
+```
+n       = len("".join(_caption_buf))     # max_chars 折りたたみ済み＝実際の表示文字数
+hold_ms = min(hold_base_ms + n × hold_char_ms, hold_max_ms)
+clear_at = start_t + (prime_component + _CAPTION_PREROLL_EST_MS(200)
+                      + total_ms + _CAPTION_END_MARGIN_MS(150) + hold_ms) / 1000
+delay   = max(0, clear_at - now)
+```
+
+`hold_max_ms < hold_base_ms` の場合は上限が優先（`min()` 挙動）。ホールド無効化（従来動作）は
+`hold_base_ms = 0, hold_char_ms = 0`（hold=0）。
+
+### 既定値の意味（2000ms + 20ms/字, 上限 5000ms）
+- `hold_base_ms = 2000`: 短発話（あいづち等）でも2秒は残す。読み手の認知遅れのベース分。
+- `hold_char_ms = 20`: 長文ほど読み残しが増えることへの線形補正（1文字あたり）。
+- `hold_max_ms = 5000`: 無発話時間に字幕が貼り付くのを防ぐ上限。既定だと 150字前後で飽和
+  （2000 + 20n ≧ 5000 → n ≧ 150）。
+
+### TOML 設定例（`[caption]` 節）
+```toml
+hold_base_ms = 2000   # 発話終了後も字幕を残す基本ホールドms（完全無効化は base=0 かつ char=0）
+hold_char_ms = 20     # 文字数連動: 表示1文字あたりの追加ホールドms
+hold_max_ms  = 5000   # ホールド合計の上限ms（次の発話が来たら即置換・停止は即消去）
+```
+3キーとも `delay_ms` と同一の 0..60000 クランプ（`config.py` `load_client_config`）。
+WSClient 生成は `app.py` が `cfg.caption.hold_*` を渡す（constructor 既定値は CaptionConfig と同一）。
+
+### 既知の非対象
+- **STT-only（音声なし Transcript 終了）は即消去**のまま（ホールド対象外）。
+- **SRT 字幕**（`srt_player.py` 経由）は本機構と無関係のため対象外。
+- **設定ダイアログUIは無し**（TOML のみ）。設定ダイアログは caption 内 `delay_ms` キーのみを
+  部分更新するため、`hold_*` キーが設定保存で欠落・破壊されることはない。
+- **stop / cancel / error / 切断は従来どおり即消去**（ユーザー明示停止・異常系に余韻を残さない）。
+  なお『即消去』は WS 通知の意味で、`delay_ms`（配信ディレイ同期）使用時はブラウザ側キューの
+  遅延後に表示へ反映される（表示/消去とも一様に遅延するため相対タイミングは不変）。

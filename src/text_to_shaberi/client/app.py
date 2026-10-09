@@ -196,6 +196,9 @@ def run_gui(config_path: str | Path) -> None:
         on_monitor=_on_monitor,
         on_caption=_on_caption,
         caption_max=cfg.caption.max_chars,
+        caption_hold_base_ms=cfg.caption.hold_base_ms,
+        caption_hold_char_ms=cfg.caption.hold_char_ms,
+        caption_hold_max_ms=cfg.caption.hold_max_ms,
     )
 
     mic_holder: list = [None]
