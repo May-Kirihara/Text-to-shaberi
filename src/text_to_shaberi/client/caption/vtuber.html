@@ -5,6 +5,7 @@
   index.html（既定フェード式）との違い:
     - テキスト変更は瞬時（フェードなしで切替）＋切替時に軽い pop アニメ（--pop-ms: 0 で無効化）
     - 発話が終わると速やかにフェードアウトして消える（--out-ms で時間調整・0 で瞬時）
+    - HOLD（下の script）を true にすると、発話が途切れても直近の行を保持（消えない）
     - 任意の背景ボックス（--box-bg に色を入れると角丸パネル表示）
 
   使い方:
@@ -100,6 +101,10 @@
 <body>
 <div id="wrap"><div id="cap" class="hide"></div></div>
 <script>
+  // HOLD = true にすると、発話が途切れても直近の行を保持（消えない）。
+  // 既定 false = 発話が終わると --out-ms でフェードアウトして消す。
+  var HOLD = false;
+
   var cap = document.getElementById('cap');
   var lastSeq = -1;
   var current = '';
@@ -161,7 +166,7 @@
         current = m.text;
         swap(m.text);
       }
-    } else {
+    } else if (!HOLD) {
       // 発話終了（visible:false）/空テキスト → 速やかにフェードアウトして消す
       cap.classList.add('hide');
       current = '';                            // 次発話で同テキストでも確実に再表示＆pop

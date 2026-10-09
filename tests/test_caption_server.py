@@ -467,6 +467,7 @@ def test_vtuber_preset_clears_on_speech_end():
     assert b"#cap.hide" in page          # 消去用クラス
     assert b"--out-ms" in page           # フェードアウト時間変数
     assert b"add('hide')" in page        # clear で hide を付与
+    assert b"HOLD" in page              # main 由来の HOLD（行保持）オプション移植をピン留め
 
 
 def test_page_bytes_vtuber_preset_with_html_suffix():
