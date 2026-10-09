@@ -156,6 +156,23 @@ class SettingsDialog(QDialog):
 
         root_layout.addWidget(output_group)
 
+        caption_group = QGroupBox("字幕")
+        caption_form = QFormLayout(caption_group)
+
+        self.caption_delay_spin = QSpinBox()
+        self.caption_delay_spin.setRange(0, 60000)
+        self.caption_delay_spin.setSingleStep(100)
+        self.caption_delay_spin.setSuffix(" ms")
+        cap_cfg = getattr(cfg, "caption", None)
+        self.caption_delay_spin.setValue(getattr(cap_cfg, "delay_ms", 0) if cap_cfg else 0)
+        self.caption_delay_spin.setToolTip(
+            "配信ディレイ同期: 字幕の表示/消去を遅らせる ms。OBS のストリームディレイに合わせる。\n"
+            "起動中の OBS ブラウザソースにも即時反映（URL の ?delay= が優先）。"
+        )
+        caption_form.addRow("配信ディレイ同期:", self.caption_delay_spin)
+
+        root_layout.addWidget(caption_group)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -252,5 +269,8 @@ class SettingsDialog(QDialog):
             },
             "output": {
                 "device": out_dev_str,
+            },
+            "caption": {
+                "delay_ms": self.caption_delay_spin.value(),
             },
         }

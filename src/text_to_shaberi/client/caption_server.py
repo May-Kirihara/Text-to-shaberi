@@ -29,13 +29,25 @@ _INLINE_HTML = (
     b"opacity:0;transition:opacity .2s;padding:.3em}#c.s{opacity:1}</style></head>"
     b"<body><pre id=c></pre><script>"
     b"const c=document.getElementById('c');let s=-1;"
+    b"let U=new URLSearchParams(location.search).get('delay');"
+    b"if(U!==null){U=parseInt(U,10);if(!isFinite(U)||U<0)U=0;else if(U>60000)U=60000}"
+    b"let V=0,Q=[],T=null;function cd(){let d=(U!==null)?U:V;return d>0?d:0}"
+    b"function P(){T=null;const n=performance.now();"
+    b"while(Q.length&&Q[0].d<=n)a(Q.shift().m);"
+    b"if(Q.length)T=setTimeout(P,Math.max(0,Q[0].d-performance.now()))}"
+    b"function E(m){if(U===null&&typeof m.delay==='number'&&m.delay>=0)"
+    b"V=m.delay>60000?60000:m.delay;let d=cd();if(d<=0){a(m);return}"
+    b"let it={d:performance.now()+d,m:m},i=Q.length;"
+    b"while(i>0&&Q[i-1].d>it.d)i--;Q.splice(i,0,it);"
+    b"if(i===0&&T!==null){clearTimeout(T);T=null}if(T===null)P()}"
     b"function a(m){if(typeof m.seq==='number'&&m.seq<s)return;s=m.seq??s;"
     b"if(m.visible){c.textContent=m.text||'';c.classList.add('s')}"
     b"else c.classList.remove('s')}"
     b"function go(){const u=(location.protocol==='https:'?'wss://':'ws://')"
     b"+location.host+'/ws'+location.search;const w=new WebSocket(u);"
-    b"w.onmessage=e=>{try{a(JSON.parse(e.data))}catch(_){}};"
-    b"w.onopen=()=>{s=-1};w.onclose=()=>setTimeout(go,1000)}go()"
+    b"w.onmessage=e=>{try{E(JSON.parse(e.data))}catch(_){}};"
+    b"w.onopen=()=>{Q.length=0;if(T!==null){clearTimeout(T);T=null}s=-1};"
+    b"w.onclose=()=>setTimeout(go,1000)}go()"
     b"</script></body></html>"
 )
 
@@ -59,6 +71,7 @@ class CaptionServer:
         port: int = 8772,
         token: str = "",
         template: str = "",
+        delay_ms: int = 0,
         on_log: Callable[[str], None] | None = None,
         loop=None,
         max_size: int = 4096,
@@ -67,6 +80,7 @@ class CaptionServer:
         self._port = port
         self._token = token
         self._template = template
+        self._delay_ms = self._clamp_delay(delay_ms)
         self._on_log = on_log
         self._loop = loop
         self._max_size = max_size
@@ -74,6 +88,16 @@ class CaptionServer:
         self._closing = False
         self._subs: dict[Any, _Subscriber] = {}
         self._cur: dict | None = None
+
+    @staticmethod
+    def _clamp_delay(delay_ms: int) -> int:
+        try:
+            d = int(delay_ms)
+        except (TypeError, ValueError):
+            return 0
+        if d < 0:
+            return 0
+        return 60000 if d > 60000 else d  # 上限 60s（JS 側と一致）
 
     def _log(self, msg: str) -> None:
         if self._on_log:
@@ -119,12 +143,29 @@ class CaptionServer:
             self._server = None
 
     def broadcast(self, event: str, payload: dict) -> None:
-        snap = {"event": event, **payload}
+        # 配信ディレイ同期: 既定 delay を毎スナップショットに載せる。latest-wins mailbox は
+        # coalesce するので「最新スナップショット＝最新 delay」が常に成立し取りこぼし不可。
+        # ブラウザは URL ?delay= があればそれを優先し、無ければこの値に追従する。
+        snap = {"event": event, **payload, "delay": self._delay_ms}
         self._cur = snap
         if self._closing:
             return
         for sub in list(self._subs.values()):
             sub.pending = snap
+            sub.event.set()
+
+    def set_delay(self, delay_ms: int) -> None:
+        # UI 設定からの即時反映。値を更新し、接続中クライアントへ「現在状態＋新 delay」を再配送する。
+        # seq は据え置き（表示は冪等・JS は seq に関係なく delay を取り込む）。発話が無く _cur が
+        # None の間は属性更新のみで、次の broadcast / 新規接続の mid-join が新 delay を運ぶ。
+        self._delay_ms = self._clamp_delay(delay_ms)
+        if self._cur is None:
+            return
+        self._cur = {**self._cur, "delay": self._delay_ms}
+        if self._closing:
+            return
+        for sub in list(self._subs.values()):
+            sub.pending = self._cur
             sub.event.set()
 
     async def _sender(self, sub: _Subscriber) -> None:

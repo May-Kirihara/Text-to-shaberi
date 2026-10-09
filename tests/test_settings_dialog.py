@@ -71,6 +71,17 @@ class TestSettingsDialogInit:
         assert "mic.vad" in vals
         assert "mic.preprocess" in vals
         assert "output" in vals
+        assert "caption" in vals
+
+    def test_values_caption_delay(self, qapp):
+        from text_to_shaberi.client.config import CaptionConfig
+
+        cfg = ClientConfig(caption=CaptionConfig(delay_ms=2500))
+        dlg = SettingsDialog(None, cfg)
+        assert dlg.caption_delay_spin.value() == 2500
+        vals = dlg.values()
+        assert vals["caption"]["delay_ms"] == 2500
+        assert isinstance(vals["caption"]["delay_ms"], int)
 
     def test_values_server_types(self, qapp):
         cfg = ClientConfig()

@@ -98,6 +98,13 @@ class CaptionConfig:
     token: str = ""
     template: str = ""      # ユーザーHTML差し替えパス（空=同梱デフォルト）
     max_chars: int = 200    # 蓄積字幕の最大長（超過時は末尾優先で切詰め）
+    delay_ms: int = 0       # 配信ディレイ同期: 字幕の表示/消去を遅らせる既定ms（URL ?delay= が優先）
+    # ホールド（余韻）: 発話の実再生終了後、字幕を残す時間（dwell + replace）。
+    # hold_base_ms=0 & hold_char_ms=0 でホールド無効（従来動作）。
+    hold_base_ms: int = 2000  # 発話再生終了後の基本ホールドms（余韻）
+    hold_char_ms: int = 20    # 表示文字数1文字あたりの追加ホールドms
+    hold_max_ms: int = 5000   # ホールド合計の上限ms（base+文字数分の合計はこれを超えない。
+                              # hold_max_ms < hold_base_ms の場合は上限が優先＝min() 挙動）
 
 
 @dataclass(slots=True)
@@ -190,4 +197,15 @@ def load_client_config(path: str | Any) -> ClientConfig:
         cap.enabled = False
     if cap.max_chars < 1:
         cap.max_chars = 1
+    if cap.delay_ms < 0:
+        cap.delay_ms = 0
+    elif cap.delay_ms > 60000:
+        cap.delay_ms = 60000  # 上限 60s（暴走/タイプミス保護・JS 側と一致）
+    # ホールド3キーも delay_ms と同一の 0..60000 にクランプ。
+    for attr in ("hold_base_ms", "hold_char_ms", "hold_max_ms"):
+        v = getattr(cap, attr)
+        if v < 0:
+            setattr(cap, attr, 0)
+        elif v > 60000:
+            setattr(cap, attr, 60000)
     return cfg

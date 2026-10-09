@@ -106,10 +106,12 @@ def _setup_input_method(cfg) -> None:
 def run_gui(config_path: str | Path) -> None:
 
     import qasync
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QTabWidget
 
     from ..common.protocol import AudioFormatPayload
     from .ui.main_window import MainWindow
+    from .ui.srt_tab import SrtTabWidget
+    from .srt_player import SrtPlayer
     from .ws_client import WSClient
     from .stream_bridge import StreamBridge
     from .text_stream_bridge import TextStreamBridge
@@ -135,6 +137,13 @@ def run_gui(config_path: str | Path) -> None:
     window = MainWindow(cfg, output_devices=_load_output_devices())
     window.set_output_device(cfg.output.device)
     window.set_mic_enabled(False)  # ready まで mic 無効（codex MED①）
+
+    central_widget = window.takeCentralWidget()
+    tab_widget = QTabWidget()
+    tab_widget.addTab(central_widget, "メイン")
+    srt_tab = SrtTabWidget()
+    tab_widget.addTab(srt_tab, "台本")
+    window.setCentralWidget(tab_widget)
 
     _profiles: list = []
     mic_enabled_by_user = [False]
@@ -187,6 +196,9 @@ def run_gui(config_path: str | Path) -> None:
         on_monitor=_on_monitor,
         on_caption=_on_caption,
         caption_max=cfg.caption.max_chars,
+        caption_hold_base_ms=cfg.caption.hold_base_ms,
+        caption_hold_char_ms=cfg.caption.hold_char_ms,
+        caption_hold_max_ms=cfg.caption.hold_max_ms,
     )
 
     mic_holder: list = [None]
@@ -194,6 +206,65 @@ def run_gui(config_path: str | Path) -> None:
     active_mic_mode = [None]
     stream_supported = [False]
     stream_bridge = StreamBridge(ws, on_log=window.log, loop=loop)
+
+    srt_player = SrtPlayer(loop, ws)
+    _srt_paused = [False]
+    _srt_entries_holder = [None]
+
+    def _srt_load_file():
+        from PySide6.QtWidgets import QFileDialog
+        from .srt_parser import load_srt_file
+
+        path, _ = QFileDialog.getOpenFileName(
+            window, "SRTファイルを選択", "", "SRT Files (*.srt);;All Files (*)"
+        )
+        if path:
+            entries = load_srt_file(path)
+            if entries:
+                _srt_entries_holder[0] = entries
+                srt_tab.set_entries(entries)
+                window.log(f"[srt] {len(entries)}件読み込み: {path}")
+            else:
+                window.log(f"[srt] 読み込み失敗: {path}")
+                window.set_status(f"SRT読み込み失敗: {path}")
+
+    async def _srt_play():
+        entries = _srt_entries_holder[0]
+        if not entries:
+            return
+        _srt_paused[0] = False
+        window.set_busy(True)
+        srt_tab.set_playing(True)
+        srt_tab.progress_bar.setValue(0)
+
+        def _on_entry(idx, total, entry):
+            srt_tab.set_current_entry(idx, total)
+
+        wait_pb = srt_tab.wait_playback_check.isChecked()
+        await srt_player.play(entries, profile=cfg.profile.active_id or None, on_entry=_on_entry, wait_for_playback=wait_pb)
+        srt_tab.set_playing(False)
+        srt_tab.progress_bar.setValue(0)
+        window.set_busy(False)
+
+    def _srt_pause_toggle():
+        _srt_paused[0] = not _srt_paused[0]
+        if _srt_paused[0]:
+            srt_player.pause()
+            srt_tab.set_paused(True)
+        else:
+            srt_player.resume()
+            srt_tab.set_paused(False)
+
+    async def _srt_stop():
+        await srt_player.stop()
+        srt_tab.set_playing(False)
+        srt_tab.set_paused(False)
+        window.set_busy(False)
+
+    srt_tab.play_button.clicked.connect(lambda: asyncio.ensure_future(_srt_play()))
+    srt_tab.pause_button.clicked.connect(lambda: _srt_pause_toggle())
+    srt_tab.stop_button.clicked.connect(lambda: asyncio.ensure_future(_srt_stop()))
+    srt_tab.load_file_button.clicked.connect(lambda: _srt_load_file())
 
     text_supported = [False]
     text_segmenter = None
@@ -279,6 +350,7 @@ def run_gui(config_path: str | Path) -> None:
             port=cfg.caption.port,
             token=cfg.caption.token,
             template=cfg.caption.template,
+            delay_ms=cfg.caption.delay_ms,
             on_log=window.log,
             loop=loop,
         )
@@ -319,12 +391,17 @@ def run_gui(config_path: str | Path) -> None:
             if active_mic_mode[0] == "utterance" and mic_holder[0] is not None and mic_holder[0].active and not shutting_down[0] and not mic_reconfiguring[0]:
                 mic_holder[0].pause()
         elif event == "idle":
-            window.set_busy(False)
-            stream_bridge.notify_ws_idle()
-            if text_stream_bridge is not None:
-                text_stream_bridge.notify_ws_idle()
-            if active_mic_mode[0] == "utterance" and mic_enabled_by_user[0] and mic_holder[0] is not None and mic_holder[0].active and not shutting_down[0] and not mic_reconfiguring[0]:
-                mic_holder[0].resume()
+            if not srt_player.is_playing:
+                window.set_busy(False)
+                stream_bridge.notify_ws_idle()
+                if text_stream_bridge is not None:
+                    text_stream_bridge.notify_ws_idle()
+                if active_mic_mode[0] == "utterance" and mic_enabled_by_user[0] and mic_holder[0] is not None and mic_holder[0].active and not shutting_down[0] and not mic_reconfiguring[0]:
+                    mic_holder[0].resume()
+            else:
+                stream_bridge.notify_ws_idle()
+                if text_stream_bridge is not None:
+                    text_stream_bridge.notify_ws_idle()
         elif event == "connected":
             window.log("[ws] connected")
         elif event == "disconnected":
@@ -408,6 +485,13 @@ def run_gui(config_path: str | Path) -> None:
 
             output_vals = vals.get("output", {})
             cfg.output.device = output_vals.get("device", cfg.output.device)
+
+            caption_vals = vals.get("caption", {})
+            if "delay_ms" in caption_vals:
+                cfg.caption.delay_ms = int(caption_vals["delay_ms"])
+                srv = _caption_server_holder[0]
+                if srv is not None:
+                    srv.set_delay(cfg.caption.delay_ms)  # 起動中OBSへ即時反映
 
             ws._apply_server_settings(
                 codec_pref=cfg.server.codec,

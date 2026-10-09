@@ -77,3 +77,28 @@
 ---
 
 *最終更新の起点：2026-06-05（forward_audio 実装、codex 9ラウンドの知見を集約）。以後ハマる度に追記。*
+
+---
+
+## SRT台本再生機能（追加）
+
+### 新規ファイル
+- `client/srt_parser.py`: SRTパーサー
+- `client/srt_player.py`: 再生スケジューラ
+- `client/ui/srt_tab.py`: 台本タブUI
+
+### 変更ファイル
+- `client/app.py`: QTabWidget化 + SrtPlayer配線（L141-146: タブ化、L207-253: SRT配線、L380: idleガード）
+
+### テスト
+- `tests/test_srt_parser.py`: 17件
+- `tests/test_srt_player.py`: 9件
+- `tests/test_srt_tab.py`: 10件
+- 既存テスト回帰なし（55テスト全通過）
+
+### 注意点
+- MainWindowクラス自体は不改変。タブ化はapp.pyで行う。
+- SRT再生中のidleイベントでは`window.set_busy(False)`をスキップ（L380ガード）。
+- on_state callbackは一時的にラップ（SrtPlayer.play内でoriginalを保存→finallyで復元）。
+- stop()では`_idle_event.set()`が必須（さもなくばハング）。
+- VTT対応は将来拡張。パーサーは抽象化済み。

@@ -77,8 +77,8 @@ def test_broadcast_show_then_clear():
         await _settle()
 
         msgs = _msgs(c1)
-        assert msgs[0] == {"event": "caption", "text": "あ", "visible": True, "seq": 1}
-        assert msgs[1] == {"event": "caption", "text": "", "visible": False, "seq": 2}
+        assert msgs[0] == {"event": "caption", "text": "あ", "visible": True, "seq": 1, "delay": 0}
+        assert msgs[1] == {"event": "caption", "text": "", "visible": False, "seq": 2, "delay": 0}
 
         c1.disconnect()
         await t1
@@ -135,7 +135,7 @@ def test_midjoin_gets_current_show():
         await _settle()
 
         msgs2 = _msgs(c2)
-        assert msgs2[0] == {"event": "caption", "text": "hello", "visible": True, "seq": 1}
+        assert msgs2[0] == {"event": "caption", "text": "hello", "visible": True, "seq": 1, "delay": 0}
 
         c1.disconnect()
         c2.disconnect()
@@ -183,7 +183,7 @@ def test_broadcast_zero_subscribers_updates_cur():
     async def go():
         srv = CaptionServer()
         srv.broadcast("caption", {"text": "x", "visible": True, "seq": 1})
-        assert srv._cur == {"event": "caption", "text": "x", "visible": True, "seq": 1}
+        assert srv._cur == {"event": "caption", "text": "x", "visible": True, "seq": 1, "delay": 0}
 
         srv.broadcast("caption", {"text": "", "visible": False, "seq": 2})
         assert srv._cur["seq"] == 2
@@ -237,7 +237,7 @@ def test_close_flushes_pending_clear():
         await srv.close()
 
         msgs = _msgs(c)
-        assert msgs[-1] == {"event": "caption", "text": "", "visible": False, "seq": 9}
+        assert msgs[-1] == {"event": "caption", "text": "", "visible": False, "seq": 9, "delay": 0}
 
         c.disconnect()
         await asyncio.gather(t, return_exceptions=True)
@@ -269,7 +269,7 @@ def test_close_waits_for_inflight_send():
         # graceful drain は sender の self-return（send 完了後）を await するので届く。
         await srv.close()
 
-        assert _msgs(c)[-1] == {"event": "caption", "text": "", "visible": False, "seq": 7}
+        assert _msgs(c)[-1] == {"event": "caption", "text": "", "visible": False, "seq": 7, "delay": 0}
 
         c.disconnect()
         await asyncio.gather(t, return_exceptions=True)
@@ -454,10 +454,20 @@ def test_page_bytes_default_is_index_fade():
 
 
 def test_page_bytes_vtuber_preset():
-    # template="vtuber" → 同梱 caption/vtuber.html（pop アニメ・フェードなし）
+    # template="vtuber" → 同梱 caption/vtuber.html（pop アニメ・瞬時切替）
     page = CaptionServer(template="vtuber")._page_bytes()
     assert b"--pop-ms" in page
-    assert b"#cap.show" not in page  # フェード式ではない
+    assert b"#cap.show" not in page  # index のフェード式クラスではない
+
+
+def test_vtuber_preset_clears_on_speech_end():
+    # VTuber プリセットは発話終了(visible:false)で速やかにフェードアウトして消える
+    # （「常時表示で消えない」回帰を防ぐ）。
+    page = CaptionServer(template="vtuber")._page_bytes()
+    assert b"#cap.hide" in page          # 消去用クラス
+    assert b"--out-ms" in page           # フェードアウト時間変数
+    assert b"add('hide')" in page        # clear で hide を付与
+    assert b"HOLD" in page              # main 由来の HOLD（行保持）オプション移植をピン留め
 
 
 def test_page_bytes_vtuber_preset_with_html_suffix():
@@ -475,3 +485,84 @@ def test_page_bytes_explicit_file_path(tmp_path):
     f.write_bytes(b"<!doctype html><body>MY CUSTOM CAPTION</body>")
     page = CaptionServer(template=str(f))._page_bytes()
     assert page == b"<!doctype html><body>MY CUSTOM CAPTION</body>"
+
+
+def test_builtin_templates_have_delay_logic():
+    # 配信ディレイ同期（?delay=ms）: 既定(index)/vtuber/inline すべてに遅延ラインが
+    # 入っていること。3テンプレの片方だけ実装漏れ＝同期ズレ回帰を防ぐ。
+    from text_to_shaberi.client.caption_server import _INLINE_HTML
+
+    for page in (
+        CaptionServer()._page_bytes(),                  # 既定 index.html
+        CaptionServer(template="vtuber")._page_bytes(),  # vtuber プリセット
+        _INLINE_HTML,                                    # 同梱欠落時の fallback
+    ):
+        assert b"delay" in page          # URL クエリ parse
+        assert b"performance.now" in page  # 遅延ライン scheduler
+        assert b"m.delay" in page        # サーバ既定(UI設定)delay の取り込み
+
+
+def test_broadcast_injects_delay_default_zero():
+    srv = CaptionServer()
+    srv.broadcast("caption", {"text": "x", "visible": True, "seq": 1})
+    assert srv._cur["delay"] == 0
+
+
+def test_broadcast_injects_configured_delay():
+    srv = CaptionServer(delay_ms=2000)
+    srv.broadcast("caption", {"text": "x", "visible": True, "seq": 1})
+    assert srv._cur["delay"] == 2000
+
+
+def test_clamp_delay_at_construction():
+    assert CaptionServer(delay_ms=-5)._delay_ms == 0
+    assert CaptionServer(delay_ms=999999)._delay_ms == 60000
+    assert CaptionServer(delay_ms=1500)._delay_ms == 1500
+
+
+def test_set_delay_clamps():
+    srv = CaptionServer()
+    srv.set_delay(-1)
+    assert srv._delay_ms == 0
+    srv.set_delay(10**9)
+    assert srv._delay_ms == 60000
+    srv.set_delay(3000)
+    assert srv._delay_ms == 3000
+
+
+def test_set_delay_with_no_current_state_is_noop_push():
+    # _cur が None（未発話）の間は属性更新のみ。次の broadcast が新 delay を運ぶ。
+    srv = CaptionServer()
+    srv.set_delay(2500)
+    assert srv._delay_ms == 2500
+    assert srv._cur is None
+    srv.broadcast("caption", {"text": "x", "visible": True, "seq": 1})
+    assert srv._cur["delay"] == 2500
+
+
+def test_set_delay_rebroadcasts_to_connected_subscriber():
+    # UI 設定変更 → 接続中クライアントへ「現在状態＋新 delay」を即時再配送（seq 据え置き）。
+    async def go():
+        srv = CaptionServer()
+        c = FakeConn()
+        t = asyncio.ensure_future(srv._handle(c))
+        await _settle()
+
+        srv.broadcast("caption", {"text": "hi", "visible": True, "seq": 1})
+        await _settle()
+
+        srv.set_delay(2000)
+        await _settle()
+
+        msgs = _msgs(c)
+        assert msgs[0]["delay"] == 0
+        # 再配送: 同 seq・同 text のまま delay だけ 2000 に更新されたスナップショット
+        assert msgs[-1] == {
+            "event": "caption", "text": "hi", "visible": True, "seq": 1, "delay": 2000
+        }
+
+        c.disconnect()
+        await t
+        await srv.close()
+
+    asyncio.run(go())

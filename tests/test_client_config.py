@@ -197,6 +197,10 @@ def test_caption_defaults(tmp_path):
     assert cfg.caption.token == ""
     assert cfg.caption.template == ""
     assert cfg.caption.max_chars == 200
+    assert cfg.caption.delay_ms == 0
+    assert cfg.caption.hold_base_ms == 2000
+    assert cfg.caption.hold_char_ms == 20
+    assert cfg.caption.hold_max_ms == 5000
 
 
 def test_caption_config_from_toml(tmp_path):
@@ -207,12 +211,59 @@ enabled = true
 port = 9100
 max_chars = 80
 template = "/tmp/my_caption.html"
+delay_ms = 2000
+hold_base_ms = 1500
+hold_char_ms = 15
+hold_max_ms = 4000
 """)
     cfg = load_client_config(str(p))
     assert cfg.caption.enabled is True
     assert cfg.caption.port == 9100
     assert cfg.caption.max_chars == 80
     assert cfg.caption.template == "/tmp/my_caption.html"
+    assert cfg.caption.delay_ms == 2000
+    assert cfg.caption.hold_base_ms == 1500
+    assert cfg.caption.hold_char_ms == 15
+    assert cfg.caption.hold_max_ms == 4000
+
+
+def test_caption_delay_ms_clamp(tmp_path):
+    p = tmp_path / "client.toml"
+    _write_toml(p, """
+[caption]
+delay_ms = -100
+""")
+    assert load_client_config(str(p)).caption.delay_ms == 0
+    _write_toml(p, """
+[caption]
+delay_ms = 999999
+""")
+    assert load_client_config(str(p)).caption.delay_ms == 60000
+
+
+def test_caption_hold_clamp(tmp_path):
+    # ホールド3キーは delay_ms と同一の 0..60000 クランプ。
+    p = tmp_path / "client.toml"
+    _write_toml(p, """
+[caption]
+hold_base_ms = -1
+hold_char_ms = -1
+hold_max_ms = -1
+""")
+    cfg = load_client_config(str(p))
+    assert cfg.caption.hold_base_ms == 0
+    assert cfg.caption.hold_char_ms == 0
+    assert cfg.caption.hold_max_ms == 0
+    _write_toml(p, """
+[caption]
+hold_base_ms = 999999
+hold_char_ms = 999999
+hold_max_ms = 999999
+""")
+    cfg = load_client_config(str(p))
+    assert cfg.caption.hold_base_ms == 60000
+    assert cfg.caption.hold_char_ms == 60000
+    assert cfg.caption.hold_max_ms == 60000
 
 
 def test_caption_nonloopback_without_token_disabled(tmp_path):
